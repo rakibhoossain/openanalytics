@@ -10,9 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/kafka"
+	"openanalytics/internal/session"
 	"openanalytics/pkg/bot"
 	"openanalytics/pkg/hash"
 	"openanalytics/pkg/httputil"
@@ -27,6 +29,8 @@ type Handler struct {
 	producer    *kafka.Producer
 	redisClient *redis.Client
 	salt        string
+	chWriter    *clickhouse.BatchWriter
+	sessionMgr  *session.Manager
 }
 
 // Config holds dependencies for Handler.
@@ -35,6 +39,8 @@ type Config struct {
 	Producer    *kafka.Producer
 	RedisClient *redis.Client
 	Salt        string
+	CHWriter    *clickhouse.BatchWriter
+	SessionMgr  *session.Manager
 }
 
 // NewHandler creates a new Ingestion Handler.
@@ -49,6 +55,8 @@ func NewHandler(cfg Config) *Handler {
 		producer:    cfg.Producer,
 		redisClient: cfg.RedisClient,
 		salt:        salt,
+		chWriter:    cfg.CHWriter,
+		sessionMgr:  cfg.SessionMgr,
 	}
 }
 
@@ -73,7 +81,13 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := h.resolveTenantID(r, &req)
 	clientIP := h.extractClientIP(r)
+	if req.IP != "" {
+		clientIP = req.IP
+	}
 	uaStr := r.Header.Get("User-Agent")
+	if req.UserAgent != "" {
+		uaStr = req.UserAgent
+	}
 	uaInfo := uaparser.Parse(uaStr)
 
 	deviceID := req.DeviceID
@@ -146,6 +160,17 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Real-time direct stream sync if running in unified mode
+	if h.chWriter != nil {
+		_ = h.chWriter.AddEvent(r.Context(), event)
+	}
+	if h.sessionMgr != nil {
+		res, _ := h.sessionMgr.Ingest(r.Context(), event)
+		if res != nil && res.ClosedSession != nil && h.chWriter != nil {
+			h.chWriter.AddSession(res.ClosedSession)
+		}
+	}
+
 	httputil.JSON(w, http.StatusAccepted, TrackResponse{
 		EventID:   event.ID.String(),
 		DeviceID:  deviceID,
@@ -195,18 +220,42 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		eventIP := clientIP
+		if req.IP != "" {
+			eventIP = req.IP
+		}
+		eventUA := uaStr
+		if req.UserAgent != "" {
+			eventUA = req.UserAgent
+		}
+		itemUAInfo := uaInfo
+		if req.UserAgent != "" {
+			itemUAInfo = uaparser.Parse(eventUA)
+		}
+
 		tenantID := h.resolveTenantID(r, &req)
 		deviceID := req.DeviceID
 		if deviceID == "" {
-			deviceID = hash.GenerateDeviceID(h.salt, shopID.String(), clientIP, uaStr)
+			deviceID = hash.GenerateDeviceID(h.salt, shopID.String(), eventIP, eventUA)
 		}
 
 		sessionID := h.resolveSessionID(&req)
 		timestamp := h.resolveTimestamp(req.Timestamp)
 
-		// TODO(accuracy): Expand referrer rules from openpanel/packages/common/server/referrers
+		itemLoc := loc
+		itemASN := asnInfo
+		if req.IP != "" && h.geoService != nil {
+			itemLoc, _ = h.geoService.Lookup(eventIP)
+			itemASN, _ = h.geoService.LookupASN(eventIP)
+		}
+
+		itemBotVerdict := botVerdict
+		if req.IP != "" || req.UserAgent != "" {
+			itemBotVerdict = bot.Detect(r, itemASN, itemUAInfo)
+		}
+
 		refInfo := referrer.Parse(req.Referrer)
-		enrichedProps := bot.ApplyToProperties(req.Properties, botVerdict)
+		enrichedProps := bot.ApplyToProperties(req.Properties, itemBotVerdict)
 
 		event := &domain.Event{
 			ID:           uuidv7.MustNew(),
@@ -225,9 +274,9 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			Referrer:     refInfo.URL,
 			ReferrerName: refInfo.Name,
 			ReferrerType: refInfo.Type,
-			OS:           uaInfo.OS,
-			Browser:      uaInfo.Browser,
-			Device:       uaInfo.Device,
+			OS:           itemUAInfo.OS,
+			Browser:      itemUAInfo.Browser,
+			Device:       itemUAInfo.Device,
 			Properties:   enrichedProps,
 			CreatedAt:    timestamp,
 		}
@@ -238,11 +287,11 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if loc != nil {
-			event.Country = loc.Country
-			event.City = loc.City
-			event.Latitude = loc.Latitude
-			event.Longitude = loc.Longitude
+		if itemLoc != nil {
+			event.Country = itemLoc.Country
+			event.City = itemLoc.City
+			event.Latitude = itemLoc.Latitude
+			event.Longitude = itemLoc.Longitude
 		}
 
 		events = append(events, event)
@@ -251,6 +300,19 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 	if err := h.producer.ProduceBatch(r.Context(), events); err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "INGEST_BATCH_FAILED", "Failed to enqueue batch: "+err.Error())
 		return
+	}
+
+	// Real-time direct stream sync if running in unified mode
+	if h.chWriter != nil {
+		for _, ev := range events {
+			_ = h.chWriter.AddEvent(r.Context(), ev)
+			if h.sessionMgr != nil {
+				res, _ := h.sessionMgr.Ingest(r.Context(), ev)
+				if res != nil && res.ClosedSession != nil {
+					h.chWriter.AddSession(res.ClosedSession)
+				}
+			}
+		}
 	}
 
 	httputil.JSON(w, http.StatusAccepted, map[string]interface{}{

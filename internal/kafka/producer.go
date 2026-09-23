@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -49,9 +50,10 @@ func NewProducer(cfg ProducerConfig) *Producer {
 		Balancer:     &kafka.Hash{}, // Guarantees identical key (shop_id:device_id) routes to identical partition
 		Compression:  kafka.Snappy,
 		BatchSize:    batchSize,
-		BatchTimeout: batchTimeout,
-		Async:        true, // Non-blocking async dispatch for maximum throughput
+		BatchTimeout: 10 * time.Millisecond,
+		Async:        false, // Synchronous delivery guarantees acknowledgment
 		RequiredAcks: kafka.RequireOne,
+		ErrorLogger:  kafka.LoggerFunc(log.Printf),
 	}
 
 	return &Producer{

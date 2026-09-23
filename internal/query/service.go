@@ -203,12 +203,12 @@ func (s *Service) GetFunnel(ctx context.Context, tenantID, shopID uuid.UUID, tim
 	// In ClickHouse windowFunnel, level represents maximum stage reached.
 	maxLevels := make(map[int]int64)
 	for rows.Next() {
-		var level int
+		var level uint8 // CRITICAL(clickhouse-uint8): ClickHouse windowFunnel returns UInt8
 		var users uint64 // CRITICAL(clickhouse-uint64): ClickHouse count() returns UInt64
 		if err := rows.Scan(&level, &users); err != nil {
 			return nil, err
 		}
-		maxLevels[level] = int64(users)
+		maxLevels[int(level)] = int64(users)
 	}
 
 	// Calculate cumulative reaches: reach(i) = sum(users where level >= i)

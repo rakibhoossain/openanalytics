@@ -105,7 +105,7 @@ func (w *BatchWriter) AddEvent(ctx context.Context, event *domain.Event) error {
 	w.eventsBuffer = append(w.eventsBuffer, event)
 	shouldFlush := len(w.eventsBuffer) >= w.batchSize
 
-	if len(w.eventsBuffer) == 1 && w.flushTimer == nil {
+	if len(w.eventsBuffer) >= 1 && w.flushTimer == nil {
 		w.flushTimer = time.AfterFunc(w.flushInterval, func() {
 			_ = w.Flush(context.Background())
 		})
@@ -187,6 +187,16 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 			rev = *ev.Revenue
 		}
 
+		var lat, lon *float64
+		if ev.Latitude != nil {
+			v := float64(*ev.Latitude)
+			lat = &v
+		}
+		if ev.Longitude != nil {
+			v := float64(*ev.Longitude)
+			lon = &v
+		}
+
 		err := batch.Append(
 			ev.ID,
 			ev.TenantID,
@@ -210,8 +220,8 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 			ev.Device,
 			ev.Country,
 			ev.City,
-			ev.Latitude,
-			ev.Longitude,
+			lat,
+			lon,
 			ev.Properties,
 			ev.CreatedAt,
 		)

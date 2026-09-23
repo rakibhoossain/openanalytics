@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18.3
     container_name: op_postgres
     restart: unless-stopped
     environment:
@@ -10,7 +10,7 @@ services:
     ports:
       - "5435:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql
       - ./deploy/postgres/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U openpanel"]
@@ -30,7 +30,7 @@ services:
       - "8123:8123"
       - "9000:9000"
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - ./data/clickhouse:/var/lib/clickhouse
       - ./deploy/clickhouse/init:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile:
@@ -62,8 +62,8 @@ services:
     container_name: op_geoipupdate
     restart: unless-stopped
     environment:
-      GEOIPUPDATE_ACCOUNT_ID: 1324838
-      GEOIPUPDATE_LICENSE_KEY: your_mmk
+      GEOIPUPDATE_ACCOUNT_ID: ${GEOIPUPDATE_ACCOUNT_ID}
+      GEOIPUPDATE_LICENSE_KEY: ${GEOIPUPDATE_LICENSE_KEY}
       GEOIPUPDATE_EDITION_IDS: "GeoLite2-City GeoLite2-ASN"
       GEOIPUPDATE_FREQUENCY: 168
     volumes:

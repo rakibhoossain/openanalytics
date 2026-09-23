@@ -1,0 +1,23 @@
+<clickhouse>
+  <users>
+    <!-- Allow default user without password for GUI tools like DBeaver, TablePlus, Metabase, and IDE extensions -->
+    <default>
+      <password></password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>1</access_management>
+    </default>
+    <openpanel>
+      <profile>default</profile>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <password><![CDATA[openpanel]]></password>
+      <quota>default</quota>
+      <access_management>1</access_management>
+    </openpanel>
+  </users>
+</clickhouse>

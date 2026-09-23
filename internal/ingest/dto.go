@@ -21,6 +21,10 @@ type TrackRequest struct {
 	Referrer   string            `json:"referrer,omitempty"`
 	Properties map[string]string `json:"properties,omitempty"`
 	Timestamp  *int64            `json:"timestamp,omitempty"` // Epoch milliseconds
+
+	// Testing / Simulation overrides (optional)
+	IP        string `json:"ip,omitempty"`
+	UserAgent string `json:"user_agent,omitempty"`
 }
 
 // BatchTrackRequest represents an array of events sent in a single HTTP request.

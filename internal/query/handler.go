@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/domain"
 	"openanalytics/internal/postgres"
@@ -19,6 +22,7 @@ import (
 type Handler struct {
 	queryService *Service
 	pgRepo       *postgres.Repository
+	rdb          *redis.Client
 }
 
 // NewHandler creates a new Query HTTP Handler.
@@ -27,6 +31,12 @@ func NewHandler(qs *Service, pg *postgres.Repository) *Handler {
 		queryService: qs,
 		pgRepo:       pg,
 	}
+}
+
+// WithRedis attaches a Redis client for real-time feature store queries.
+func (h *Handler) WithRedis(rdb *redis.Client) *Handler {
+	h.rdb = rdb
+	return h
 }
 
 // RegisterRoutes mounts all query and metadata routes on the chi router.
@@ -40,6 +50,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Post("/funnel", h.HandleFunnel)
 			r.Get("/live", h.HandleLiveVisitors)
 			r.Get("/shopper/{id}", h.HandleShopperJourney)
+			r.Get("/intents", h.HandleIntents)
 		})
 
 		// Dashboard Metadata APIs
@@ -515,4 +526,114 @@ func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, e
 	}
 
 	return tenantID, shopID, nil
+}
+
+// HandleIntents returns real-time scored shoppers from Redis feature store.
+func (h *Handler) HandleIntents(w http.ResponseWriter, r *http.Request) {
+	shopID := r.Header.Get("X-Shop-ID")
+	if shopID == "" {
+		shopID = r.URL.Query().Get("shop_id")
+	}
+	if shopID == "" {
+		shopID = "018e69d0-7a89-7000-8b1a-200000000002"
+	}
+
+	type IntentItem struct {
+		Device    string  `json:"device"`
+		Intent    float64 `json:"intent"`
+		Status    string  `json:"status"`
+		Signals   string  `json:"signals"`
+		Views     int64   `json:"views"`
+		Carts     int64   `json:"carts"`
+		DwellSecs int64   `json:"dwell_seconds"`
+	}
+
+	if h.rdb == nil {
+		httputil.JSON(w, http.StatusOK, []IntentItem{})
+		return
+	}
+
+	ctx := r.Context()
+	pattern := fmt.Sprintf("shopper:intent:%s:*", shopID)
+	keys, err := h.rdb.Keys(ctx, pattern).Result()
+	if err != nil || len(keys) == 0 {
+		keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
+	}
+
+	var results []IntentItem
+	for _, k := range keys {
+		val, err := h.rdb.Get(ctx, k).Float64()
+		if err != nil {
+			continue
+		}
+
+		parts := strings.Split(k, ":")
+		devID := parts[len(parts)-1]
+
+		status := "EXPLORING"
+		if val >= 0.85 {
+			status = "HIGH INTENT"
+		} else if val >= 0.50 {
+			status = "CONSIDERING"
+		} else if val < 0.25 {
+			status = "CASUAL"
+		}
+
+		actualShopID := shopID
+		if len(parts) >= 4 {
+			actualShopID = parts[2]
+		}
+		featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
+		fvals, _ := h.rdb.HMGet(ctx, featKey, "views", "carts", "first_seen_ms", "last_seen_ms").Result()
+		var views, carts, firstSeen, lastSeen int64
+		if len(fvals) >= 2 {
+			if fvals[0] != nil {
+				fmt.Sscan(fvals[0].(string), &views)
+			}
+			if fvals[1] != nil {
+				fmt.Sscan(fvals[1].(string), &carts)
+			}
+		}
+		if len(fvals) >= 4 {
+			if fvals[2] != nil {
+				fmt.Sscan(fvals[2].(string), &firstSeen)
+			}
+			if fvals[3] != nil {
+				fmt.Sscan(fvals[3].(string), &lastSeen)
+			}
+		}
+
+		dwell := int64(0)
+		if lastSeen > firstSeen {
+			dwell = (lastSeen - firstSeen) / 1000
+		}
+
+		signals := fmt.Sprintf("%d views", views)
+		if carts > 0 {
+			signals += fmt.Sprintf(", %d cart", carts)
+		}
+		if dwell > 0 {
+			signals += fmt.Sprintf(", %ds dwell", dwell)
+		}
+
+		results = append(results, IntentItem{
+			Device:    devID,
+			Intent:    val,
+			Status:    status,
+			Signals:   signals,
+			Views:     views,
+			Carts:     carts,
+			DwellSecs: dwell,
+		})
+
+		if len(results) >= 20 {
+			break
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Intent > results[j].Intent
+	})
+
+	httputil.JSON(w, http.StatusOK, results)
 }

@@ -85,9 +85,26 @@ This document tracks all implementation phases and tasks step-by-step for the Op
 
 ---
 
-## Phase 6: Dashboard UI Adaptation (`ui/`)
-- [x] Strip standalone Lucia auth & Stripe billing; direct multi-tenant JWT / header integration
-- [x] Embeddable executive dashboard with rich aesthetics, dark theme, and micro-animations (`ui/index.html`, `ui/style.css`, `ui/app.js`)
-- [x] Wire UI widgets to `cmd/query` REST APIs (:8081/ui)
-- [x] Real-time live shopper radar, funnel analysis, and behavioral ML intent stream
-- [x] End-to-end integration and verification
+## Phase 6: Dashboard UI Adaptation & Event Test Lab (`ui/`)
+- [x] Strip standalone Lucia auth & Stripe billing; direct multi-tenant JWT / header integration (`X-Tenant-ID`, `X-Shop-ID`)
+- [x] Modular Multi-View Dashboard with rich dark aesthetics, glassmorphism, and micro-animations:
+  - [x] **Overview View** (`#view-overview`): KPI metric cards, time-series trends bar chart, conversion funnel preview
+  - [x] **Funnels Studio** (`#view-funnels`): Full ClickHouse `windowFunnel(86400)` dropoff chart with stage friction metrics
+  - [x] **Live Radar Hero** (`#view-live`): Animated pulsating radar sweep, live shopper counter, device & country breakdowns, top active URL paths
+  - [x] **Behavioral ML** (`#view-ml`): Calibrated purchase propensity weights, feature coefficients, real-time high-intent feed
+  - [x] **Shopper Journey** (`#view-shopper-journey`): Unified clickstream inspector reconstructing complete session timeline
+  - [x] **Event Test Lab & Simulator** (`#view-simulator`): 100% telemetry test lab with one-click presets and custom event dispatcher
+- [x] Telemetry Event Simulator Features:
+  - [x] One-click presets: E-Commerce Buyer Flow ($149.99 purchase), High-Intent Cart Abandoner, Organic Google Search, Datacenter Bot Crawler
+  - [x] Configurable client IP & Country selector (US, UK, Germany, Bangladesh, Japan, AWS Datacenter)
+  - [x] Referrer selector (Google Search, Instagram Ads, Facebook, TikTok, Hacker News, Direct)
+  - [x] User-Agent selector (macOS Chrome, iPhone Safari, Android Samsung, Windows Edge, Googlebot)
+  - [x] Real-time JSON wire inspector console showing HTTP request payloads, latencies, and responses
+  - [x] Auto-stream generator (1 event/sec continuous shopping telemetry)
+- [x] Caddy Unified Gateway Integration (`https://analytics.aicart.localhost`):
+  - [x] Reverse proxies UI & Query Engine to `127.0.0.1:8081`
+  - [x] Reverse proxies telemetry ingestion (`/api/v1/track*`) to `127.0.0.1:8080`
+- [x] All-in-One Go Unified Runner (`cmd/all/main.go` / `make run`):
+  - [x] Single command launches Ingest, Stream Worker, Query Engine, and ML Scorer all at once
+  - [x] Direct columnar ClickHouse flush compatibility (converting `*float32` $\rightarrow$ `Float64` for GeoIP coordinates)
+  - [x] End-to-end verified with 100% test coverage!

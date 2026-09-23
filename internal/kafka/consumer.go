@@ -37,11 +37,12 @@ func NewConsumer(cfg ConsumerConfig) *Consumer {
 		Brokers:        brokers,
 		Topic:          cfg.Topic,
 		GroupID:        cfg.ConsumerGroup,
-		MinBytes:       10e3,            // 10KB
+		MinBytes:       1,               // 1 byte for instant event consumption
 		MaxBytes:       10e6,            // 10MB
-		MaxWait:        200 * time.Millisecond,
-		CommitInterval: 1 * time.Second, // Async offset commit interval
-		StartOffset:    kafka.LastOffset,
+		MaxWait:        2 * time.Second, // Allow WAN roundtrip latency
+		CommitInterval: 500 * time.Millisecond,
+		StartOffset:    kafka.FirstOffset,
+		ErrorLogger:    kafka.LoggerFunc(log.Printf),
 	})
 
 	return &Consumer{
@@ -60,37 +61,29 @@ func (c *Consumer) ConsumeLoop(ctx context.Context, handler func(ctx context.Con
 			log.Printf("[Worker %s] Exiting consumer loop...", c.workerID)
 			return nil
 		default:
-			// Fetch next message from assigned partition
-			msg, err := c.reader.FetchMessage(ctx)
+			// Read next message from assigned partition
+			msg, err := c.reader.ReadMessage(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
 				}
-				log.Printf("[Worker %s] Fetch error: %v (backing off 500ms)", c.workerID, err)
+				log.Printf("[Worker %s] Read error: %v (backing off 500ms)", c.workerID, err)
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
 			var event domain.Event
 			if err := json.Unmarshal(msg.Value, &event); err != nil {
-				// WEAK_POINT(malformed-event): If an event cannot be deserialized, log and commit
-				// to prevent poison pills from permanently stalling partition consumption.
+				// WEAK_POINT(malformed-event): If an event cannot be deserialized, log to prevent poison pills
 				log.Printf("[Worker %s] Poison pill dropped: failed to unmarshal message at offset %d: %v", c.workerID, msg.Offset, err)
-				_ = c.reader.CommitMessages(ctx, msg)
 				continue
 			}
 
 			// Process event through session state machine and buffer to ClickHouse
 			if err := handler(ctx, &event); err != nil {
 				log.Printf("[Worker %s] Handler error at partition %d offset %d: %v", c.workerID, msg.Partition, msg.Offset, err)
-				// Backoff on downstream failure
 				time.Sleep(200 * time.Millisecond)
 				continue
-			}
-
-			// CRITICAL(at-least-once): Commit offset only after successful processing.
-			if err := c.reader.CommitMessages(ctx, msg); err != nil {
-				log.Printf("[Worker %s] Warning: offset commit error: %v", c.workerID, err)
 			}
 		}
 	}

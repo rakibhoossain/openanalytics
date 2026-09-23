@@ -76,13 +76,34 @@ func main() {
 	defer kafkaProducer.Close()
 
 	// ------------------------------------------------------------------
-	// 2. Start Ingestion Engine (:8080)
+	// 2. ClickHouse Batch Writer & Session State Machine
+	// ------------------------------------------------------------------
+	chWriter, err := clickhouse.NewBatchWriter(ctx, clickhouse.Config{
+		Addr:          cfg.ClickHouseAddr,
+		Database:      cfg.ClickHouseDatabase,
+		Username:      cfg.ClickHouseUsername,
+		Password:      cfg.ClickHousePassword,
+		BatchSize:     cfg.KafkaBatchSize,
+		FlushInterval: 2 * time.Second,
+	})
+	if err != nil {
+		log.Printf("[Worker] Warning: ClickHouse writer init: %v", err)
+	} else {
+		defer chWriter.Close()
+	}
+
+	sessionMgr := session.NewManager(rdb, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute)
+
+	// ------------------------------------------------------------------
+	// 3. Start Ingestion Engine (:8080)
 	// ------------------------------------------------------------------
 	ingestHandler := ingest.NewHandler(ingest.Config{
 		GeoService:  geoService,
 		Producer:    kafkaProducer,
 		RedisClient: rdb,
 		Salt:        "aicart_openanalytics_salt",
+		CHWriter:    chWriter,
+		SessionMgr:  sessionMgr,
 	})
 
 	ingestRouter := chi.NewRouter()
@@ -113,6 +134,7 @@ func main() {
 	ingestRouter.Route("/api/v1", func(r chi.Router) {
 		r.Post("/track", ingestHandler.HandleTrack)
 		r.Post("/batch", ingestHandler.HandleBatch)
+		r.Post("/track/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
 	})
 
@@ -131,24 +153,8 @@ func main() {
 	}()
 
 	// ------------------------------------------------------------------
-	// 3. Start Stream Worker & Session State Machine
+	// 4. Start Stream Worker (Kafka Partition Consumer)
 	// ------------------------------------------------------------------
-	chWriter, err := clickhouse.NewBatchWriter(ctx, clickhouse.Config{
-		Addr:          cfg.ClickHouseAddr,
-		Database:      cfg.ClickHouseDatabase,
-		Username:      cfg.ClickHouseUsername,
-		Password:      cfg.ClickHousePassword,
-		BatchSize:     cfg.KafkaBatchSize,
-		FlushInterval: 2 * time.Second,
-	})
-	if err != nil {
-		log.Printf("[Worker] Warning: ClickHouse writer init: %v", err)
-	} else {
-		defer chWriter.Close()
-	}
-
-	sessionMgr := session.NewManager(rdb, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute)
-
 	workerConsumer := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:       cfg.KafkaBrokers,
 		Topic:         cfg.KafkaEventsTopic,
@@ -221,7 +227,7 @@ func main() {
 		defer qs.Close()
 	}
 
-	queryHandler := query.NewHandler(qs, pgRepo)
+	queryHandler := query.NewHandler(qs, pgRepo).WithRedis(rdb)
 	queryRouter := chi.NewRouter()
 	queryRouter.Use(middleware.RequestID)
 	queryRouter.Use(middleware.RealIP)
@@ -235,6 +241,12 @@ func main() {
 	}))
 
 	queryHandler.RegisterRoutes(queryRouter)
+
+	// In all-in-one unified mode, also route /api/v1/track on 8081 for direct UI convenience
+	queryRouter.Post("/api/v1/track", ingestHandler.HandleTrack)
+	queryRouter.Post("/api/v1/batch", ingestHandler.HandleBatch)
+	queryRouter.Post("/api/v1/track/batch", ingestHandler.HandleBatch)
+	queryRouter.Get("/api/v1/track/device-id", ingestHandler.HandleDeviceID)
 
 	// Redirect root / directly to /ui/
 	queryRouter.Get("/", func(w http.ResponseWriter, r *http.Request) {

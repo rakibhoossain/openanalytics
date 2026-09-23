@@ -24,6 +24,8 @@ data/geo/*.tar.gz
 *.model
 data/models/*.onnx
 data/geo/
+data/postgres
+data/clickhouse
 
 # OS metadata
 .DS_Store
