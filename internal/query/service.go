@@ -119,7 +119,7 @@ func (s *Service) GetTrends(ctx context.Context, tenantID, shopID uuid.UUID, met
 	query := fmt.Sprintf(`
 		SELECT 
 			toString(%s(created_at)) AS bucket,
-			%s AS value
+			toFloat64(%s) AS value
 		FROM %s.events
 		WHERE tenant_id = ? AND shop_id = ? AND created_at >= ? %s
 		GROUP BY bucket
@@ -204,11 +204,11 @@ func (s *Service) GetFunnel(ctx context.Context, tenantID, shopID uuid.UUID, tim
 	maxLevels := make(map[int]int64)
 	for rows.Next() {
 		var level int
-		var users int64
+		var users uint64 // CRITICAL(clickhouse-uint64): ClickHouse count() returns UInt64
 		if err := rows.Scan(&level, &users); err != nil {
 			return nil, err
 		}
-		maxLevels[level] = users
+		maxLevels[level] = int64(users)
 	}
 
 	// Calculate cumulative reaches: reach(i) = sum(users where level >= i)
@@ -277,13 +277,14 @@ func (s *Service) GetLiveVisitors(ctx context.Context, tenantID, shopID uuid.UUI
 	cutoff := time.Now().UTC().Add(-time.Duration(windowMinutes) * time.Minute)
 
 	// 1. Total distinct active shoppers
+	// CRITICAL(clickhouse-uint64): ClickHouse uniq() and count() return UInt64
 	totalQuery := fmt.Sprintf(`
 		SELECT uniq(device_id) 
 		FROM %s.events 
 		WHERE tenant_id = ? AND shop_id = ? AND created_at >= ?
 	`, s.database)
 
-	var totalActive int64
+	var totalActive uint64
 	if err := s.conn.QueryRow(ctx, totalQuery, tenantID, shopID, cutoff).Scan(&totalActive); err != nil {
 		return nil, fmt.Errorf("failed to query active shoppers: %w", err)
 	}
@@ -300,9 +301,9 @@ func (s *Service) GetLiveVisitors(ctx context.Context, tenantID, shopID uuid.UUI
 		defer devRows.Close()
 		for devRows.Next() {
 			var dev string
-			var cnt int64
+			var cnt uint64
 			if err := devRows.Scan(&dev, &cnt); err == nil {
-				devices[dev] = cnt
+				devices[dev] = int64(cnt)
 			}
 		}
 	}
@@ -321,9 +322,9 @@ func (s *Service) GetLiveVisitors(ctx context.Context, tenantID, shopID uuid.UUI
 		defer cRows.Close()
 		for cRows.Next() {
 			var c string
-			var cnt int64
+			var cnt uint64
 			if err := cRows.Scan(&c, &cnt); err == nil {
-				countries[c] = cnt
+				countries[c] = int64(cnt)
 			}
 		}
 	}
@@ -341,15 +342,16 @@ func (s *Service) GetLiveVisitors(ctx context.Context, tenantID, shopID uuid.UUI
 	if pRows, err := s.conn.Query(ctx, pathQuery, tenantID, shopID, cutoff); err == nil {
 		defer pRows.Close()
 		for pRows.Next() {
-			var p domain.PathCount
-			if err := pRows.Scan(&p.Path, &p.Count); err == nil {
-				topPaths = append(topPaths, p)
+			var p string
+			var cnt uint64
+			if err := pRows.Scan(&p, &cnt); err == nil {
+				topPaths = append(topPaths, domain.PathCount{Path: p, Count: int64(cnt)})
 			}
 		}
 	}
 
 	return &domain.LiveVisitorsResult{
-		ActiveShoppers: totalActive,
+		ActiveShoppers: int64(totalActive),
 		WindowMinutes:  windowMinutes,
 		Devices:        devices,
 		Countries:      countries,

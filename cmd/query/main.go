@@ -79,8 +79,17 @@ func main() {
 	handler := query.NewHandler(qs, pgRepo)
 	handler.RegisterRoutes(r)
 
-	// Serve Static UI Assets
-	uiDir := http.Dir("ui")
+	// Redirect root / directly to /ui/
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusFound)
+	})
+
+	// Serve Static UI Assets (resolving from current dir or openanalytics/)
+	uiPath := "ui"
+	if _, err := os.Stat(uiPath); os.IsNotExist(err) {
+		uiPath = "openanalytics/ui"
+	}
+	uiDir := http.Dir(uiPath)
 	r.Handle("/ui/*", http.StripPrefix("/ui", http.FileServer(uiDir)))
 	r.Get("/ui", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)

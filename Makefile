@@ -1,10 +1,14 @@
-.PHONY: build test run-ingest run-worker run-query run-ml tidy clean
+.PHONY: build run test run-ingest run-worker run-query run-ml tidy clean
 
 build:
+	go build -o bin/openanalytics cmd/all/main.go
 	go build -o bin/ingest cmd/ingest/main.go
 	go build -o bin/worker cmd/worker/main.go
 	go build -o bin/query cmd/query/main.go
 	go build -o bin/ml-worker cmd/ml-worker/main.go
+
+run:
+	go run cmd/all/main.go
 
 test:
 	go test -v ./...

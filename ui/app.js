@@ -3,8 +3,8 @@
  * Interfaces directly with the Golang Data Plane (:8081)
  */
 
-// WEAK_POINT(api-url-hardcoding): Configurable query host; defaults to localhost:8081
-const API_BASE = window.OPENANALYTICS_API_URL || 'http://localhost:8081';
+// WEAK_POINT(api-url-hardcoding): Configurable query host; use relative path under HTTPS Caddy proxy
+const API_BASE = window.OPENANALYTICS_API_URL || (window.location.protocol === 'https:' ? '' : 'http://localhost:8081');
 
 // State
 const state = {
