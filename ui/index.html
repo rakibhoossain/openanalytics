@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenAnalytics • Executive Intelligence Dashboard</title>
+  <meta name="description" content="High-performance real-time analytics and behavioral ML engine for e-commerce.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-dark">
+  <div class="app-layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-title">OpenAnalytics</span>
+          <span class="brand-badge">Data Plane</span>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <a href="#overview" class="nav-item active" id="nav-overview">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+          Overview
+        </a>
+        <a href="#funnels" class="nav-item" id="nav-funnels">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>
+          Funnels
+        </a>
+        <a href="#live" class="nav-item" id="nav-live">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          Live Radar
+          <span class="pulse-dot"></span>
+        </a>
+        <a href="#ml-intent" class="nav-item" id="nav-ml">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10H12V2z"></path><path d="M12 2a10 10 0 0 1 10 10"></path></svg>
+          Behavioral ML
+        </a>
+        <a href="#shopper-journey" class="nav-item" id="nav-journey">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          Shopper Journey
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="connection-status">
+          <span class="status-indicator online"></span>
+          <div class="status-meta">
+            <span class="status-label">Query Engine</span>
+            <span class="status-port">:8081 (Native TCP 9000)</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-viewport">
+      <!-- Top Navigation Header -->
+      <header class="top-bar">
+        <div class="page-headline">
+          <h1 class="page-title">Executive Commerce Telemetry</h1>
+          <p class="page-subtitle">Multi-tenant behavioral clickstream & high-intent conversion radar</p>
+        </div>
+
+        <div class="control-actions">
+          <div class="tenant-selector">
+            <label for="tenant-input" class="visually-hidden">Tenant ID</label>
+            <input type="text" id="tenant-input" class="pill-input" placeholder="Tenant UUIDv7" value="018e69d0-7a89-7000-8b1a-200000000001">
+            <input type="text" id="shop-input" class="pill-input" placeholder="Shop UUIDv7" value="018e69d0-7a89-7000-8b1a-200000000002">
+          </div>
+
+          <div class="time-range-group" id="time-range-picker">
+            <button class="time-pill" data-range="today">Today</button>
+            <button class="time-pill" data-range="24h">24h</button>
+            <button class="time-pill active" data-range="7d">7 Days</button>
+            <button class="time-pill" data-range="30d">30 Days</button>
+          </div>
+
+          <button id="btn-refresh" class="btn-primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            Refresh
+          </button>
+        </div>
+      </header>
+
+      <!-- KPI Summary Cards -->
+      <section class="kpi-grid">
+        <div class="kpi-card" id="card-revenue">
+          <div class="kpi-header">
+            <span class="kpi-title">Gross Revenue</span>
+            <span class="kpi-icon revenue-glow">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+            </span>
+          </div>
+          <div class="kpi-value" id="kpi-revenue">$0.00</div>
+          <div class="kpi-footer">
+            <span class="trend-badge positive">+18.4%</span>
+            <span class="kpi-subtext">vs previous period</span>
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-visitors">
+          <div class="kpi-header">
+            <span class="kpi-title">Unique Shoppers</span>
+            <span class="kpi-icon visitors-glow">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+            </span>
+          </div>
+          <div class="kpi-value" id="kpi-visitors">0</div>
+          <div class="kpi-footer">
+            <span class="trend-badge positive">+12.1%</span>
+            <span class="kpi-subtext">device fingerprints</span>
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-cart-adds">
+          <div class="kpi-header">
+            <span class="kpi-title">Cart Additions</span>
+            <span class="kpi-icon cart-glow">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"></circle><circle cx="20" cy="21" r="1"></circle><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path></svg>
+            </span>
+          </div>
+          <div class="kpi-value" id="kpi-cart-adds">0</div>
+          <div class="kpi-footer">
+            <span class="trend-badge positive">+8.6%</span>
+            <span class="kpi-subtext">intent events</span>
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-conversion">
+          <div class="kpi-header">
+            <span class="kpi-title">Funnel Conversion</span>
+            <span class="kpi-icon conversion-glow">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            </span>
+          </div>
+          <div class="kpi-value" id="kpi-conversion">0.0%</div>
+          <div class="kpi-footer">
+            <span class="trend-badge neutral">~ 2.4% avg</span>
+            <span class="kpi-subtext">visit to order</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trends & Funnel Split Section -->
+      <section class="dashboard-split">
+        <!-- Trends Chart Widget -->
+        <div class="chart-card flex-2">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Shopper Activity Trends</h2>
+              <p class="card-desc">ClickHouse columnar time-series aggregation</p>
+            </div>
+            <div class="metric-selector-group">
+              <button class="metric-pill active" data-metric="page_views">Views</button>
+              <button class="metric-pill" data-metric="unique_visitors">Shoppers</button>
+              <button class="metric-pill" data-metric="cart_adds">Cart Adds</button>
+              <button class="metric-pill" data-metric="orders">Orders</button>
+              <button class="metric-pill" data-metric="revenue">Revenue</button>
+            </div>
+          </div>
+
+          <div class="chart-canvas-container" id="trends-chart">
+            <div class="chart-bars" id="trends-bars">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Conversion Funnel Widget -->
+        <div class="chart-card flex-1">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Conversion Funnel</h2>
+              <p class="card-desc">Multi-stage dropoff analysis (windowFunnel)</p>
+            </div>
+          </div>
+
+          <div class="funnel-container" id="funnel-display">
+            <!-- Rendered dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- Live Radar & ML Intent Section -->
+      <section class="dashboard-split">
+        <!-- Live Shopper Radar -->
+        <div class="chart-card flex-1">
+          <div class="card-head">
+            <div class="live-title-wrap">
+              <span class="pulsing-live-pill">LIVE RADAR</span>
+              <h2 class="card-title">Active Shoppers Right Now</h2>
+            </div>
+            <span class="live-counter" id="live-count">0 Active</span>
+          </div>
+
+          <div class="live-details-grid">
+            <div class="live-breakdown-box">
+              <span class="breakdown-title">Device Breakdown</span>
+              <div id="device-breakdown-list" class="breakdown-list"></div>
+            </div>
+            <div class="live-breakdown-box">
+              <span class="breakdown-title">Top Geographies</span>
+              <div id="geo-breakdown-list" class="breakdown-list"></div>
+            </div>
+          </div>
+
+          <div class="top-paths-section">
+            <span class="breakdown-title">High-Traffic URLs</span>
+            <div id="paths-breakdown-list" class="paths-list"></div>
+          </div>
+        </div>
+
+        <!-- Real-Time Behavioral ML Intent Stream -->
+        <div class="chart-card flex-1">
+          <div class="card-head">
+            <div>
+              <h2 class="card-title">Behavioral ML Intent Stream</h2>
+              <p class="card-desc">Real-time purchase propensity scoring (< 0.5ms)</p>
+            </div>
+            <span class="model-tag">Model: v1.0.0</span>
+          </div>
+
+          <div class="intent-stream-table" id="intent-stream">
+            <div class="intent-header-row">
+              <span>Shopper / Device</span>
+              <span>Propensity</span>
+              <span>Status</span>
+              <span>Signals</span>
+            </div>
+            <div class="intent-body" id="intent-stream-rows">
+              <!-- Populated via live scorer updates -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Individual Shopper Journey Inspector -->
+      <section class="chart-card">
+        <div class="card-head">
+          <div>
+            <h2 class="card-title">Shopper Timeline Inspector</h2>
+            <p class="card-desc">Inspect complete unified event history across sessions and cart interactions</p>
+          </div>
+          <div class="search-wrap">
+            <input type="text" id="shopper-search-input" class="pill-input-wide" placeholder="Enter Device ID or Customer UUID...">
+            <button id="btn-inspect" class="btn-secondary">Inspect</button>
+          </div>
+        </div>
+
+        <div class="timeline-container" id="shopper-timeline">
+          <div class="timeline-empty-state">
+            Enter a device fingerprint or customer UUID above to view the unified behavioral journey.
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

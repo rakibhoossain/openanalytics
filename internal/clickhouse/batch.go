@@ -1,0 +1,284 @@
+package clickhouse
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"openanalytics/internal/domain"
+)
+
+// Config holds connection parameters for ClickHouse.
+type Config struct {
+	Addr          string
+	Database      string
+	Username      string
+	Password      string
+	BatchSize     int
+	FlushInterval time.Duration
+}
+
+// BatchWriter manages buffering and native columnar TCP block insertion into ClickHouse.
+type BatchWriter struct {
+	conn          driver.Conn
+	database      string
+	batchSize     int
+	flushInterval time.Duration
+
+	mu             sync.Mutex
+	eventsBuffer   []*domain.Event
+	sessionsBuffer []*domain.Session
+
+	flushTimer *time.Timer
+	isClosed   bool
+}
+
+// NewBatchWriter initializes a ClickHouse batch writer.
+func NewBatchWriter(ctx context.Context, cfg Config) (*BatchWriter, error) {
+	if cfg.BatchSize <= 0 {
+		// CRITICAL(clickhouse-block-size): ClickHouse MergeTree requires batches of 1,000 - 10,000+
+		// rows per insert. Tiny individual inserts cause "Too many parts" errors and cluster degradation.
+		cfg.BatchSize = 5000
+	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = 2 * time.Second
+	}
+	if cfg.Database == "" {
+		cfg.Database = "openpanel"
+	}
+
+	conn, err := clickhouse.Open(&clickhouse.Options{
+		Addr: []string{cfg.Addr},
+		Auth: clickhouse.Auth{
+			Database: cfg.Database,
+			Username: cfg.Username,
+			Password: cfg.Password,
+		},
+		Settings: clickhouse.Settings{
+			"max_execution_time": 60,
+		},
+		Compression: &clickhouse.Compression{
+			Method: clickhouse.CompressionLZ4,
+		},
+		DialTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open clickhouse connection: %w", err)
+	}
+
+	if err := conn.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ping clickhouse at %s: %w", cfg.Addr, err)
+	}
+
+	w := &BatchWriter{
+		conn:           conn,
+		database:       cfg.Database,
+		batchSize:      cfg.BatchSize,
+		flushInterval:  cfg.FlushInterval,
+		eventsBuffer:   make([]*domain.Event, 0, cfg.BatchSize),
+		sessionsBuffer: make([]*domain.Session, 0, 500),
+	}
+
+	return w, nil
+}
+
+// AddEvent adds an event to the local buffer, triggering a flush if the batch size is exceeded.
+func (w *BatchWriter) AddEvent(ctx context.Context, event *domain.Event) error {
+	w.mu.Lock()
+	if w.isClosed {
+		w.mu.Unlock()
+		return fmt.Errorf("batch writer is closed")
+	}
+
+	// WEAK_POINT(memory-backpressure): In a prolonged ClickHouse outage, cap maximum memory buffer
+	// to avoid OOM killer. Beyond 100,000 events, block or push back on Kafka consumer.
+	if len(w.eventsBuffer) >= 100000 {
+		w.mu.Unlock()
+		return fmt.Errorf("buffer capacity exceeded; pausing consumption for backpressure")
+	}
+
+	w.eventsBuffer = append(w.eventsBuffer, event)
+	shouldFlush := len(w.eventsBuffer) >= w.batchSize
+
+	if len(w.eventsBuffer) == 1 && w.flushTimer == nil {
+		w.flushTimer = time.AfterFunc(w.flushInterval, func() {
+			_ = w.Flush(context.Background())
+		})
+	}
+	w.mu.Unlock()
+
+	if shouldFlush {
+		return w.Flush(ctx)
+	}
+	return nil
+}
+
+// AddSession buffers a closed session summary.
+func (w *BatchWriter) AddSession(session *domain.Session) {
+	if session == nil {
+		return
+	}
+	w.mu.Lock()
+	w.sessionsBuffer = append(w.sessionsBuffer, session)
+	w.mu.Unlock()
+}
+
+// Flush writes all buffered events and sessions to ClickHouse in a single native TCP transaction.
+func (w *BatchWriter) Flush(ctx context.Context) error {
+	w.mu.Lock()
+	if w.flushTimer != nil {
+		w.flushTimer.Stop()
+		w.flushTimer = nil
+	}
+
+	if len(w.eventsBuffer) == 0 && len(w.sessionsBuffer) == 0 {
+		w.mu.Unlock()
+		return nil
+	}
+
+	events := w.eventsBuffer
+	sessions := w.sessionsBuffer
+	w.eventsBuffer = make([]*domain.Event, 0, w.batchSize)
+	w.sessionsBuffer = make([]*domain.Session, 0, 500)
+	w.mu.Unlock()
+
+	// 1. Flush Events
+	if len(events) > 0 {
+		if err := w.flushEventsWithRetry(ctx, events); err != nil {
+			log.Printf("[ClickHouse] ERROR flushing %d events: %v", len(events), err)
+			return err
+		}
+		log.Printf("[ClickHouse] Flushed %d events successfully", len(events))
+	}
+
+	// 2. Flush Sessions
+	if len(sessions) > 0 {
+		if err := w.flushSessionsWithRetry(ctx, sessions); err != nil {
+			log.Printf("[ClickHouse] ERROR flushing %d sessions: %v", len(sessions), err)
+			return err
+		}
+		log.Printf("[ClickHouse] Flushed %d sessions successfully", len(sessions))
+	}
+
+	return nil
+}
+
+func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain.Event) error {
+	query := fmt.Sprintf(`INSERT INTO %s.events (
+		id, tenant_id, shop_id, name, device_id, customer_id, session_id,
+		revenue, currency, product_id, cart_id, order_id, path, origin,
+		referrer, referrer_name, referrer_type, os, browser, device,
+		country, city, latitude, longitude, properties, created_at
+	)`, w.database)
+
+	batch, err := w.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to prepare events batch: %w", err)
+	}
+
+	for _, ev := range events {
+		var rev float64
+		if ev.Revenue != nil {
+			rev = *ev.Revenue
+		}
+
+		err := batch.Append(
+			ev.ID,
+			ev.TenantID,
+			ev.ShopID,
+			ev.Name,
+			ev.DeviceID,
+			ev.CustomerID,
+			ev.SessionID,
+			rev,
+			ev.Currency,
+			ev.ProductID,
+			ev.CartID,
+			ev.OrderID,
+			ev.Path,
+			ev.Origin,
+			ev.Referrer,
+			ev.ReferrerName,
+			ev.ReferrerType,
+			ev.OS,
+			ev.Browser,
+			ev.Device,
+			ev.Country,
+			ev.City,
+			ev.Latitude,
+			ev.Longitude,
+			ev.Properties,
+			ev.CreatedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to append event to batch: %w", err)
+		}
+	}
+
+	return batch.Send()
+}
+
+func (w *BatchWriter) flushSessionsWithRetry(ctx context.Context, sessions []*domain.Session) error {
+	query := fmt.Sprintf(`INSERT INTO %s.sessions (
+		id, tenant_id, shop_id, device_id, customer_id,
+		started_at, ended_at, duration, entry_path, exit_path,
+		referrer, referrer_name, referrer_type, events_count,
+		has_cart_add, has_purchase, total_revenue
+	)`, w.database)
+
+	batch, err := w.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to prepare sessions batch: %w", err)
+	}
+
+	for _, s := range sessions {
+		var hasCart uint8
+		if s.HasCartAdd {
+			hasCart = 1
+		}
+		var hasPurch uint8
+		if s.HasPurchase {
+			hasPurch = 1
+		}
+
+		err := batch.Append(
+			s.ID,
+			s.TenantID,
+			s.ShopID,
+			s.DeviceID,
+			s.CustomerID,
+			s.StartedAt,
+			s.EndedAt,
+			s.Duration,
+			s.EntryPath,
+			s.ExitPath,
+			s.Referrer,
+			s.ReferrerName,
+			s.ReferrerType,
+			s.EventsCount,
+			hasCart,
+			hasPurch,
+			s.TotalRevenue,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to append session to batch: %w", err)
+		}
+	}
+
+	return batch.Send()
+}
+
+// Close flushes all remaining items and closes the ClickHouse connection.
+func (w *BatchWriter) Close() error {
+	w.mu.Lock()
+	w.isClosed = true
+	w.mu.Unlock()
+
+	_ = w.Flush(context.Background())
+	return w.conn.Close()
+}

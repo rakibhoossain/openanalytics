@@ -30,11 +30,13 @@ type Event struct {
 	ReferrerName string `json:"referrer_name,omitempty"`
 	ReferrerType string `json:"referrer_type,omitempty"`
 
-	OS      string `json:"os,omitempty"`
-	Browser string `json:"browser,omitempty"`
-	Device  string `json:"device,omitempty"`
-	Country string `json:"country,omitempty"`
-	City    string `json:"city,omitempty"`
+	OS        string    `json:"os,omitempty"`
+	Browser   string    `json:"browser,omitempty"`
+	Device    string    `json:"device,omitempty"`
+	Country   string    `json:"country,omitempty"`
+	City      string    `json:"city,omitempty"`
+	Latitude  *float32  `json:"latitude,omitempty"`
+	Longitude *float32  `json:"longitude,omitempty"`
 
 	Properties map[string]string `json:"properties,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`

@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS openpanel.events (
     device LowCardinality(String),
     country LowCardinality(FixedString(2)),
     city String,
+    latitude Nullable(Float64),
+    longitude Nullable(Float64),
     
     properties Map(String, String) CODEC(ZSTD(3)),
     created_at DateTime64(3) CODEC(DoubleDelta, ZSTD(3))

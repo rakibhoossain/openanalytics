@@ -1,0 +1,27 @@
+{
+  "version": "v1.0.0",
+  "model_type": "calibrated_logistic_intent",
+  "features": [
+    "views_count",
+    "cart_adds_count",
+    "distinct_products",
+    "dwell_time_seconds"
+  ],
+  "coefficients": {
+    "bias": -2.85,
+    "views_count": 0.12,
+    "cart_adds_count": 1.95,
+    "distinct_products": -0.15,
+    "dwell_time_seconds": 0.0035
+  },
+  "thresholds": {
+    "low_intent": 0.3,
+    "medium_intent": 0.65,
+    "high_intent": 0.85
+  },
+  "metadata": {
+    "trained_at": "2026-09-23T10:00:00Z",
+    "accuracy_auc": 0.892,
+    "latency_target_microseconds": 50
+  }
+}
