@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/domain"
 	"openanalytics/pkg/uuidv7"
 )
@@ -43,6 +44,8 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 	// CRITICAL(atomic-state): Avoids race conditions when multiple worker replicas receive rapid events from the same shopper.
 	script := redis.NewScript(`
 		local key = KEYS[1]
+		local wallclock_key = KEYS[2]
+		local shops_key = KEYS[3]
 		local event_time_ms = tonumber(ARGV[1])
 		local timeout_ms = tonumber(ARGV[2])
 		local new_session_id = ARGV[3]
@@ -50,9 +53,25 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 		local referrer_name = ARGV[5]
 		local referrer_type = ARGV[6]
 		local entry_path = ARGV[7]
+		local tenant_id = ARGV[8]
+		local shop_id = ARGV[9]
+		local device_id = ARGV[10]
+		local os = ARGV[11]
+		local browser = ARGV[12]
+		local device = ARGV[13]
+		local country = ARGV[14]
+		local city = ARGV[15]
 
 		local current_id = redis.call('HGET', key, 'id')
 		local last_seen_ms = tonumber(redis.call('HGET', key, 'last_seen_ms') or '0')
+
+		-- Update wallclock index for the background session reaper
+		if wallclock_key and device_id then
+			redis.call('ZADD', wallclock_key, event_time_ms, device_id)
+		end
+		if shops_key and shop_id then
+			redis.call('SADD', shops_key, shop_id)
+		end
 
 		-- Check if no session exists or if the idle threshold has elapsed
 		if not current_id or (event_time_ms - last_seen_ms > timeout_ms) then
@@ -68,7 +87,7 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 			local closed_has_purchase = redis.call('HGET', key, 'has_purchase')
 			local closed_revenue = redis.call('HGET', key, 'total_revenue')
 
-			-- Initialize fresh session
+			-- Initialize fresh session with full device & context metadata
 			redis.call('HMSET', key,
 				'id', new_session_id,
 				'started_ms', event_time_ms,
@@ -78,6 +97,15 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 				'referrer_name', referrer_name,
 				'referrer_type', referrer_type,
 				'entry_path', entry_path,
+				'exit_path', entry_path,
+				'tenant_id', tenant_id,
+				'shop_id', shop_id,
+				'device_id', device_id,
+				'os', os,
+				'browser', browser,
+				'device', device,
+				'country', country,
+				'city', city,
 				'has_cart_add', 0,
 				'has_purchase', 0,
 				'total_revenue', 0
@@ -94,7 +122,7 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 			end
 		else
 			-- Extend existing session
-			redis.call('HSET', key, 'last_seen_ms', event_time_ms)
+			redis.call('HSET', key, 'last_seen_ms', event_time_ms, 'exit_path', entry_path)
 			redis.call('HINCRBY', key, 'events_count', 1)
 			redis.call('EXPIRE', key, math.floor(timeout_ms / 1000) * 2)
 
@@ -127,11 +155,13 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 	}
 
 	sessionKey := fmt.Sprintf("session:%s:%s", event.ShopID.String(), event.DeviceID)
+	wallclockKey := fmt.Sprintf("session:wallclock:%s", event.ShopID.String())
+	shopsKey := "session:shops"
 	newSessionID := uuidv7.MustNew().String()
 	eventTimeMs := event.CreatedAt.UnixMilli()
 	timeoutMs := m.sessionTimeout.Milliseconds()
 
-	res, err := m.luaScript.Run(ctx, m.rdb, []string{sessionKey},
+	res, err := m.luaScript.Run(ctx, m.rdb, []string{sessionKey, wallclockKey, shopsKey},
 		eventTimeMs,
 		timeoutMs,
 		newSessionID,
@@ -139,6 +169,14 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 		event.ReferrerName,
 		event.ReferrerType,
 		event.Path,
+		event.TenantID.String(),
+		event.ShopID.String(),
+		event.DeviceID,
+		event.OS,
+		event.Browser,
+		event.Device,
+		event.Country,
+		event.City,
 	).Slice()
 
 	if err != nil {
@@ -176,23 +214,29 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 	if event.Name == "purchase" || event.Name == "order_completed" {
 		_ = m.rdb.HSet(ctx, sessionKey, "has_purchase", 1).Err()
 		if event.Revenue != nil {
-			_ = m.rdb.HIncrByFloat(ctx, sessionKey, "total_revenue", *event.Revenue).Err()
+			_ = m.rdb.HIncrBy(ctx, sessionKey, "total_revenue", *event.Revenue).Err()
 		}
 	}
 
 	var closedSession *domain.Session
-	if kind == "boundary" && len(res) >= 17 {
-		closedID, _ := uuid.Parse(res[5].(string))
+	if kind == "boundary" && len(res) >= 16 {
+		closedID, _ := uuid.Parse(fmt.Sprint(res[5]))
 		var startedMs, endedMs int64
-		_, _ = fmt.Sscan(res[6].(string), &startedMs)
-		_, _ = fmt.Sscan(res[7].(string), &endedMs)
+		_, _ = fmt.Sscan(fmt.Sprint(res[6]), &startedMs)
+		_, _ = fmt.Sscan(fmt.Sprint(res[7]), &endedMs)
 		var eventsCount uint32
-		_, _ = fmt.Sscan(res[8].(string), &eventsCount)
+		_, _ = fmt.Sscan(fmt.Sprint(res[8]), &eventsCount)
 
 		durationSec := uint32(0)
 		if endedMs > startedMs {
 			durationSec = uint32((endedMs - startedMs) / 1000)
 		}
+
+		var hasCart, hasPurchase uint8
+		_, _ = fmt.Sscan(fmt.Sprint(res[13]), &hasCart)
+		_, _ = fmt.Sscan(fmt.Sprint(res[14]), &hasPurchase)
+		var totRev int64
+		_, _ = fmt.Sscan(fmt.Sprint(res[15]), &totRev)
 
 		closedSession = &domain.Session{
 			ID:           closedID,
@@ -203,12 +247,15 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 			StartedAt:    time.UnixMilli(startedMs).UTC(),
 			EndedAt:      time.UnixMilli(endedMs).UTC(),
 			Duration:     durationSec,
-			EntryPath:    res[12].(string),
-			ExitPath:     event.Path,
-			Referrer:     res[9].(string),
-			ReferrerName: res[10].(string),
-			ReferrerType: res[11].(string),
+			EntryPath:    fmt.Sprint(res[12]),
+			ExitPath:     fmt.Sprint(res[12]),
+			Referrer:     fmt.Sprint(res[9]),
+			ReferrerName: fmt.Sprint(res[10]),
+			ReferrerType: fmt.Sprint(res[11]),
 			EventsCount:  eventsCount,
+			HasCartAdd:   hasCart > 0,
+			HasPurchase:  hasPurchase > 0,
+			TotalRevenue: totRev,
 		}
 	}
 
@@ -217,4 +264,82 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 		SessionID:     sid,
 		ClosedSession: closedSession,
 	}, nil
+}
+
+// ProcessEventLifecycle processes session boundaries, generates synthetic session_start
+// and session_end events, and buffers all events and closed sessions to ClickHouse.
+// Matches OpenPanel's `events.incoming-event.ts`.
+func (m *Manager) ProcessEventLifecycle(ctx context.Context, event *domain.Event, chWriter *clickhouse.BatchWriter) error {
+	res, err := m.Ingest(ctx, event)
+	if err != nil {
+		return err
+	}
+
+	if chWriter != nil && res != nil {
+		// 1. If previous session timed out or crossed a day boundary, emit synthetic session_end
+		if res.Kind == "boundary" && res.ClosedSession != nil {
+			endProps := map[string]string{
+				"__bounce":   fmt.Sprintf("%t", res.ClosedSession.EventsCount <= 1),
+				"__duration": fmt.Sprintf("%d", res.ClosedSession.Duration),
+			}
+			sessionEndEvent := &domain.Event{
+				ID:           uuidv7.MustNew(),
+				TenantID:     res.ClosedSession.TenantID,
+				ShopID:       res.ClosedSession.ShopID,
+				Name:         "session_end",
+				DeviceID:     res.ClosedSession.DeviceID,
+				SessionID:    res.ClosedSession.ID,
+				CustomerID:   res.ClosedSession.CustomerID,
+				Path:         res.ClosedSession.ExitPath,
+				Origin:       event.Origin,
+				Referrer:     res.ClosedSession.Referrer,
+				ReferrerName: res.ClosedSession.ReferrerName,
+				ReferrerType: res.ClosedSession.ReferrerType,
+				OS:           event.OS,
+				Browser:      event.Browser,
+				Device:       event.Device,
+				Country:      event.Country,
+				City:         event.City,
+				Latitude:     event.Latitude,
+				Longitude:    event.Longitude,
+				Properties:   endProps,
+				CreatedAt:    res.ClosedSession.EndedAt,
+			}
+			_ = chWriter.AddEvent(ctx, sessionEndEvent)
+			chWriter.AddSession(res.ClosedSession)
+		}
+
+		// 2. If a new session began (new or boundary), emit synthetic session_start event (-100ms)
+		if res.Kind == "new" || res.Kind == "boundary" {
+			sessionStartEvent := &domain.Event{
+				ID:           uuidv7.MustNew(),
+				TenantID:     event.TenantID,
+				ShopID:       event.ShopID,
+				Name:         "session_start",
+				DeviceID:     event.DeviceID,
+				SessionID:    res.SessionID,
+				CustomerID:   event.CustomerID,
+				Path:         event.Path,
+				Origin:       event.Origin,
+				Referrer:     event.Referrer,
+				ReferrerName: event.ReferrerName,
+				ReferrerType: event.ReferrerType,
+				OS:           event.OS,
+				Browser:      event.Browser,
+				Device:       event.Device,
+				Country:      event.Country,
+				City:         event.City,
+				Latitude:     event.Latitude,
+				Longitude:    event.Longitude,
+				Properties:   map[string]string{},
+				CreatedAt:    event.CreatedAt.Add(-100 * time.Millisecond),
+			}
+			_ = chWriter.AddEvent(ctx, sessionStartEvent)
+		}
+
+		// 3. Buffer original event
+		return chWriter.AddEvent(ctx, event)
+	}
+
+	return nil
 }

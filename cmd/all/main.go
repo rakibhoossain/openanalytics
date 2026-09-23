@@ -17,6 +17,7 @@ import (
 
 	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/config"
+	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/ingest"
@@ -93,6 +94,14 @@ func main() {
 	}
 
 	sessionMgr := session.NewManager(rdb, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute)
+	sessionReaper := session.NewReaper(rdb, chWriter, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute, 1*time.Minute)
+	sessionReaper.Start(ctx)
+
+	// Start Reporting & Automated Intelligence Schedulers (Hourly Rollup + Daily Insights)
+	if chWriter != nil && chWriter.Conn() != nil {
+		reportingCron := cron.NewScheduler(chWriter.Conn())
+		reportingCron.Start(ctx)
+	}
 
 	// ------------------------------------------------------------------
 	// 3. Start Ingestion Engine (:8080)
@@ -166,11 +175,8 @@ func main() {
 	go func() {
 		log.Printf("[Stream Worker] Kafka consumer loop active for topic %s", cfg.KafkaEventsTopic)
 		_ = workerConsumer.ConsumeLoop(ctx, func(ctx context.Context, event *domain.Event) error {
-			if sessionMgr != nil {
-				res, _ := sessionMgr.Ingest(ctx, event)
-				if res != nil && res.ClosedSession != nil && chWriter != nil {
-					chWriter.AddSession(res.ClosedSession)
-				}
+			if sessionMgr != nil && chWriter != nil {
+				return sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
 			}
 			if chWriter != nil {
 				return chWriter.AddEvent(ctx, event)

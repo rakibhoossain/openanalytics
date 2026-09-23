@@ -87,6 +87,11 @@ func NewBatchWriter(ctx context.Context, cfg Config) (*BatchWriter, error) {
 	return w, nil
 }
 
+// Conn returns the underlying ClickHouse native driver connection.
+func (w *BatchWriter) Conn() driver.Conn {
+	return w.conn
+}
+
 // AddEvent adds an event to the local buffer, triggering a flush if the batch size is exceeded.
 func (w *BatchWriter) AddEvent(ctx context.Context, event *domain.Event) error {
 	w.mu.Lock()
@@ -182,9 +187,9 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 	}
 
 	for _, ev := range events {
-		var rev float64
+		var rev *int64
 		if ev.Revenue != nil {
-			rev = *ev.Revenue
+			rev = ev.Revenue
 		}
 
 		var lat, lon *float64
@@ -195,6 +200,11 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 		if ev.Longitude != nil {
 			v := float64(*ev.Longitude)
 			lon = &v
+		}
+
+		props := ev.Properties
+		if props == nil {
+			props = make(map[string]string)
 		}
 
 		err := batch.Append(
@@ -222,8 +232,8 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 			ev.City,
 			lat,
 			lon,
-			ev.Properties,
-			ev.CreatedAt,
+			props,
+			ev.CreatedAt.UTC(),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append event to batch: %w", err)
@@ -262,8 +272,8 @@ func (w *BatchWriter) flushSessionsWithRetry(ctx context.Context, sessions []*do
 			s.ShopID,
 			s.DeviceID,
 			s.CustomerID,
-			s.StartedAt,
-			s.EndedAt,
+			s.StartedAt.UTC(),
+			s.EndedAt.UTC(),
 			s.Duration,
 			s.EntryPath,
 			s.ExitPath,

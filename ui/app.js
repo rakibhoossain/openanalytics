@@ -19,6 +19,32 @@ const state = {
   autoStreamActive: false,
 };
 
+// Global Intl Currency Formatter for Exact Cents -> Decimal Display
+const defaultCurrencyFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
+function formatCentsToCurrency(cents, currency = 'USD') {
+  if (cents === null || cents === undefined || isNaN(cents)) return '$0.00';
+  const decimalVal = Number(cents) / 100;
+  if (!currency || currency === 'USD') {
+    return defaultCurrencyFormatter.format(decimalVal);
+  }
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: currency,
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(decimalVal);
+  } catch (e) {
+    return `$${decimalVal.toFixed(2)}`;
+  }
+}
+
 // DOM References
 const el = {
   // Navigation & Headline
@@ -258,6 +284,20 @@ function bindEvents() {
     if (el.simConsole) el.simConsole.innerHTML = '';
   });
 
+  // Recompute Insights Button
+  const btnRecompute = document.getElementById('btn-recompute-insights');
+  if (btnRecompute) {
+    btnRecompute.addEventListener('click', async () => {
+      btnRecompute.innerHTML = '<span class="pulse-dot"></span> Computing...';
+      await fetchAPI('/api/v1/query/insights/compute', { method: 'POST' });
+      await loadInsights();
+      btnRecompute.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+        Recompute Anomaly Feed
+      `;
+    });
+  }
+
   // One-Click Preset Buttons
   el.presetBuyerFlow?.addEventListener('click', runBuyerFlowPreset);
   el.presetAbandonFlow?.addEventListener('click', runAbandonFlowPreset);
@@ -369,9 +409,50 @@ async function loadAllData() {
     loadKPISummaries(),
     loadTrends(),
     loadFunnel(),
+    loadInsights(),
     fetchLiveRadar(),
     populateMLIntentStream()
   ]);
+}
+
+// 0. Automated Commerce Intelligence Feed (Pre-computed Daily/Rolling Insights)
+async function loadInsights() {
+  const container = document.getElementById('insights-container');
+  if (!container) return;
+
+  const res = await fetchAPI('/api/v1/query/insights?limit=6');
+  const cards = res?.data || [];
+
+  if (cards.length === 0) {
+    container.innerHTML = `
+      <div style="grid-column: 1 / -1; padding: 1.5rem; background: rgba(255,255,255,0.02); border-radius: 8px; border: 1px dashed var(--border-subtle); color: var(--text-muted); font-size: 0.85rem; text-align: center;">
+        No anomaly deviations detected across the rolling 24h baseline. Automated intelligence cards are computed on schedule.
+      </div>
+    `;
+    return;
+  }
+
+  container.innerHTML = cards.map(c => {
+    const isUp = c.direction === 'up';
+    const isDown = c.direction === 'down';
+    const badgeColor = isUp ? 'var(--accent-emerald, #10b981)' : isDown ? 'var(--accent-rose, #f43f5e)' : 'var(--text-muted, #94a3b8)';
+    const badgeBg = isUp ? 'rgba(16, 185, 129, 0.12)' : isDown ? 'rgba(244, 63, 94, 0.12)' : 'rgba(255, 255, 255, 0.05)';
+    const pctStr = c.change_pct !== 0 ? `${c.change_pct > 0 ? '+' : ''}${c.change_pct.toFixed(1)}%` : 'steady';
+
+    return `
+      <div class="insight-card" style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 1rem; display: flex; flex-direction: column; gap: 0.5rem; transition: border-color 0.2s;">
+        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
+          <span style="font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600;">${c.module_key}</span>
+          <span style="font-size: 0.75rem; font-weight: 700; color: ${badgeColor}; background: ${badgeBg}; padding: 0.15rem 0.45rem; border-radius: 4px;">${pctStr}</span>
+        </div>
+        <div style="font-size: 0.95rem; font-weight: 600; color: var(--text-heading);">${escapeHtml(c.title)}</div>
+        <div style="font-size: 0.8rem; color: var(--text-subtle); line-height: 1.4;">${escapeHtml(c.summary)}</div>
+        <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: auto; padding-top: 0.4rem; border-top: 1px solid rgba(255,255,255,0.05);">
+          ${new Date(c.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • Impact Score: ${Math.round(c.impact_score)}
+        </div>
+      </div>
+    `;
+  }).join('');
 }
 
 // 1. KPI Summaries
@@ -387,7 +468,7 @@ async function loadKPISummaries() {
     totalRev = revRes.data.data.reduce((sum, pt) => sum + (pt.value || 0), 0);
   }
   if (el.kpiRevenue) {
-    el.kpiRevenue.textContent = `$${totalRev.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    el.kpiRevenue.textContent = formatCentsToCurrency(totalRev);
   }
 
   let totalVisitors = 0;
@@ -424,7 +505,7 @@ async function loadTrends() {
     const heightPercent = Math.max((p.value / maxVal) * 100, 6);
     const label = formatBucketLabel(p.timestamp);
     const formattedVal = state.currentMetric === 'revenue' 
-      ? `$${(p.value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      ? formatCentsToCurrency(p.value || 0)
       : (p.value || 0).toLocaleString();
 
     return `
@@ -639,7 +720,7 @@ async function inspectShopper(identifier) {
         <div class="timeline-node">
           <div class="node-title">
             <span>${ev.name} ${ev.product_id ? `(Product: ${ev.product_id})` : ''}</span>
-            <span style="font-size: 0.78rem; color: var(--accent-emerald); font-weight: 700;">${ev.revenue ? `$${Number(ev.revenue).toFixed(2)}` : ''}</span>
+            <span style="font-size: 0.78rem; color: var(--accent-emerald); font-weight: 700;">${ev.revenue ? formatCentsToCurrency(ev.revenue, ev.currency || 'USD') : ''}</span>
           </div>
           <div class="node-meta">
             <span>${ev.path || '/'} • ${ev.browser || 'Browser'} on ${ev.os || 'OS'} • ${ev.country || 'Global'} (${ev.city || ''})</span>
@@ -665,7 +746,7 @@ function getFormEventPayload() {
     logConsole('warn', 'Custom properties JSON parse error, sending empty object');
   }
 
-  const revenueVal = parseFloat(el.simRevenue?.value);
+  const revenueVal = parseInt(el.simRevenue?.value, 10);
 
   return {
     tenant_id: state.tenantId,
@@ -716,7 +797,7 @@ async function handleSendBatchEvents() {
         ip: ip,
         user_agent: ua,
         path: '/products/leather-jacket',
-        product_id: 'prod-jacket-99',
+        product_id: '018e69d0-7a89-7000-8b1a-200000000099',
         timestamp: Date.now() - 3000
       },
       {
@@ -727,8 +808,9 @@ async function handleSendBatchEvents() {
         ip: ip,
         user_agent: ua,
         path: '/cart',
-        product_id: 'prod-jacket-99',
-        revenue: 149.99,
+        product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+        cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+        revenue: 14999,
         currency: 'USD',
         timestamp: Date.now() - 2000
       },
@@ -740,8 +822,9 @@ async function handleSendBatchEvents() {
         ip: ip,
         user_agent: ua,
         path: '/checkout',
-        product_id: 'prod-jacket-99',
-        revenue: 149.99,
+        product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+        cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+        revenue: 14999,
         currency: 'USD',
         timestamp: Date.now() - 1000
       },
@@ -753,9 +836,10 @@ async function handleSendBatchEvents() {
         ip: ip,
         user_agent: ua,
         path: '/order/confirmed',
-        product_id: 'prod-jacket-99',
-        order_id: `ord-${Math.floor(100000 + Math.random() * 900000)}`,
-        revenue: 149.99,
+        product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+        cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+        order_id: '018e69d0-7a89-7000-8b1a-200000000088',
+        revenue: 14999,
         currency: 'USD',
         timestamp: Date.now()
       }
@@ -844,7 +928,7 @@ async function runBuyerFlowPreset() {
     ip: ip,
     user_agent: ua,
     path: '/products/premium-leather-jacket',
-    product_id: 'prod-jacket-99',
+    product_id: '018e69d0-7a89-7000-8b1a-200000000099',
     timestamp: Date.now() - 2000
   });
 
@@ -857,8 +941,9 @@ async function runBuyerFlowPreset() {
     ip: ip,
     user_agent: ua,
     path: '/cart',
-    product_id: 'prod-jacket-99',
-    revenue: 149.99,
+    product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+    cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+    revenue: 14999,
     currency: 'USD',
     timestamp: Date.now() - 1000
   });
@@ -872,9 +957,10 @@ async function runBuyerFlowPreset() {
     ip: ip,
     user_agent: ua,
     path: '/checkout/success',
-    product_id: 'prod-jacket-99',
-    order_id: `ord-${Math.floor(100000 + Math.random() * 900000)}`,
-    revenue: 149.99,
+    product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+    cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+    order_id: '018e69d0-7a89-7000-8b1a-200000000088',
+    revenue: 14999,
     currency: 'USD',
     timestamp: Date.now()
   });
@@ -890,6 +976,12 @@ async function runAbandonFlowPreset() {
 
   logConsole('info', `[PRESET: Cart Abandoner] Browsing 3 products and adding to cart without checkout for ${deviceId}...`);
 
+  const sneakerUUIDs = [
+    '018e69d0-7a89-7000-8b1a-200000000091',
+    '018e69d0-7a89-7000-8b1a-200000000092',
+    '018e69d0-7a89-7000-8b1a-200000000093'
+  ];
+
   for (let i = 1; i <= 3; i++) {
     await dispatchTelemetry('/api/v1/track', {
       tenant_id: state.tenantId,
@@ -899,7 +991,7 @@ async function runAbandonFlowPreset() {
       ip: ip,
       user_agent: ua,
       path: `/products/designer-sneaker-${i}`,
-      product_id: `prod-sneaker-${i}`,
+      product_id: sneakerUUIDs[i - 1],
       timestamp: Date.now() - (4000 - i * 1000)
     });
   }
@@ -913,8 +1005,9 @@ async function runAbandonFlowPreset() {
     ip: ip,
     user_agent: ua,
     path: '/cart',
-    product_id: 'prod-sneaker-3',
-    revenue: 219.00,
+    product_id: sneakerUUIDs[2],
+    cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
+    revenue: 21900,
     currency: 'USD',
     timestamp: Date.now()
   });

@@ -16,12 +16,12 @@ type Event struct {
 	CustomerID *uuid.UUID `json:"customer_id,omitempty"` // UUIDv7 (nil for guest shoppers)
 	SessionID  uuid.UUID `json:"session_id"`            // UUIDv7
 
-	// E-Commerce Attributes
-	Revenue   *float64 `json:"revenue,omitempty"`
-	Currency  string   `json:"currency,omitempty"`
-	ProductID string   `json:"product_id,omitempty"`
-	CartID    string   `json:"cart_id,omitempty"`
-	OrderID   string   `json:"order_id,omitempty"`
+	// E-Commerce Attributes (Revenue stored in exact integer cents, e.g. $1.78 = 178 cents)
+	Revenue   *int64     `json:"revenue,omitempty"`
+	Currency  string     `json:"currency,omitempty"`
+	ProductID *uuid.UUID `json:"product_id,omitempty"`
+	CartID    *uuid.UUID `json:"cart_id,omitempty"`
+	OrderID   *uuid.UUID `json:"order_id,omitempty"`
 
 	// Web & Device Context
 	Path         string `json:"path,omitempty"`
@@ -60,8 +60,8 @@ type Session struct {
 	ReferrerName string `json:"referrer_name,omitempty"`
 	ReferrerType string `json:"referrer_type,omitempty"`
 
-	EventsCount  uint32  `json:"events_count"`
-	HasCartAdd   bool    `json:"has_cart_add"`
-	HasPurchase  bool    `json:"has_purchase"`
-	TotalRevenue float64 `json:"total_revenue"`
+	EventsCount  uint32 `json:"events_count"`
+	HasCartAdd   bool   `json:"has_cart_add"`
+	HasPurchase  bool   `json:"has_purchase"`
+	TotalRevenue int64  `json:"total_revenue"` // Stored in integer cents
 }

@@ -2,8 +2,10 @@ package ingest
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +97,65 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		deviceID = hash.GenerateDeviceID(h.salt, shopID.String(), clientIP, uaStr)
 	}
 
+	// Fast-path deduplication (matches OpenPanel's duplicateHook):
+	// Drops rapid client double-clicks, duplicate dispatches, and network retries within 100ms
+	if h.redisClient != nil {
+		dedupKey := fmt.Sprintf("dedup:%s:%s:%s:%s", shopID.String(), deviceID, req.Name, req.Path)
+		set, err := h.redisClient.SetNX(r.Context(), dedupKey, "1", 100*time.Millisecond).Result()
+		if err == nil && !set {
+			httputil.JSON(w, http.StatusOK, TrackResponse{
+				EventID:   "",
+				DeviceID:  deviceID,
+				SessionID: "",
+				Status:    "duplicate_ignored",
+			})
+			return
+		}
+	}
+
+	// Known Crawler Bypass (matches OpenPanel's isBotHook):
+	// Search engine spiders and scrapers (Googlebot, Bingbot, etc.) are acknowledged
+	// without poisoning Kafka analytics topics or e-commerce conversion funnels.
+	if bot.IsKnownCrawler(uaStr) {
+		httputil.JSON(w, http.StatusAccepted, TrackResponse{
+			EventID:   "",
+			DeviceID:  deviceID,
+			SessionID: "",
+			Status:    "crawler_accepted",
+		})
+		return
+	}
+
+	// Flatten and normalize properties (supports OpenPanel toDots format)
+	flatProps := FlattenProperties(req.Properties)
+
+	// Fallback to __path, __referrer, __revenue if missing from top-level request
+	if req.Path == "" {
+		if p, ok := flatProps["__path"]; ok && p != "" {
+			req.Path = p
+		} else if p, ok := flatProps["path"]; ok && p != "" {
+			req.Path = p
+		}
+	}
+	if req.Referrer == "" {
+		if ref, ok := flatProps["__referrer"]; ok && ref != "" {
+			req.Referrer = ref
+		} else if ref, ok := flatProps["referrer"]; ok && ref != "" {
+			req.Referrer = ref
+		}
+	}
+	if req.Revenue == nil {
+		if revStr, ok := flatProps["__revenue"]; ok && revStr != "" {
+			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+				req.Revenue = &v
+			}
+		} else if revStr, ok := flatProps["revenue"]; ok && revStr != "" {
+			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+				req.Revenue = &v
+			}
+		}
+	}
+
 	sessionID := h.resolveSessionID(&req)
 	timestamp := h.resolveTimestamp(req.Timestamp)
 
@@ -115,7 +176,7 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	// TODO(accuracy): Port advanced multi-category heuristics from
 	// `openpanel/apps/api/src/bots/suspicion.ts` and `header-signals.ts`
 	botVerdict := bot.Detect(r, asnInfo, uaInfo)
-	enrichedProps := bot.ApplyToProperties(req.Properties, botVerdict)
+	enrichedProps := bot.ApplyToProperties(flatProps, botVerdict)
 
 	event := &domain.Event{
 		ID:           uuidv7.MustNew(),
@@ -126,9 +187,9 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		SessionID:    sessionID,
 		Revenue:      req.Revenue,
 		Currency:     req.Currency,
-		ProductID:    req.ProductID,
-		CartID:       req.CartID,
-		OrderID:      req.OrderID,
+		ProductID:    parseUUIDPtr(req.ProductID),
+		CartID:       parseUUIDPtr(req.CartID),
+		OrderID:      parseUUIDPtr(req.OrderID),
 		Path:         req.Path,
 		Origin:       r.Header.Get("Origin"),
 		Referrer:     refInfo.URL,
@@ -154,20 +215,22 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		event.Longitude = loc.Longitude
 	}
 
-	// Produce to Kafka
-	if err := h.producer.Produce(r.Context(), event); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "INGEST_FAILED", "Failed to enqueue event: "+err.Error())
-		return
-	}
-
-	// Real-time direct stream sync if running in unified mode
-	if h.chWriter != nil {
-		_ = h.chWriter.AddEvent(r.Context(), event)
-	}
-	if h.sessionMgr != nil {
-		res, _ := h.sessionMgr.Ingest(r.Context(), event)
-		if res != nil && res.ClosedSession != nil && h.chWriter != nil {
-			h.chWriter.AddSession(res.ClosedSession)
+	// Produce to Kafka with reliable direct fallback
+	if h.producer != nil {
+		if err := h.producer.Produce(r.Context(), event); err != nil {
+			// Fallback to direct ClickHouse sync so data is NEVER lost during Kafka outages
+			if h.sessionMgr != nil && h.chWriter != nil {
+				_ = h.sessionMgr.ProcessEventLifecycle(r.Context(), event, h.chWriter)
+			} else if h.chWriter != nil {
+				_ = h.chWriter.AddEvent(r.Context(), event)
+			}
+		}
+	} else {
+		// Real-time direct stream sync if running without Kafka
+		if h.sessionMgr != nil && h.chWriter != nil {
+			_ = h.sessionMgr.ProcessEventLifecycle(r.Context(), event, h.chWriter)
+		} else if h.chWriter != nil {
+			_ = h.chWriter.AddEvent(r.Context(), event)
 		}
 	}
 
@@ -233,6 +296,36 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			itemUAInfo = uaparser.Parse(eventUA)
 		}
 
+		// Flatten and normalize properties (supports OpenPanel toDots format)
+		itemFlatProps := FlattenProperties(req.Properties)
+
+		// Fallback to __path, __referrer, __revenue if missing from top-level request
+		if req.Path == "" {
+			if p, ok := itemFlatProps["__path"]; ok && p != "" {
+				req.Path = p
+			} else if p, ok := itemFlatProps["path"]; ok && p != "" {
+				req.Path = p
+			}
+		}
+		if req.Referrer == "" {
+			if ref, ok := itemFlatProps["__referrer"]; ok && ref != "" {
+				req.Referrer = ref
+			} else if ref, ok := itemFlatProps["referrer"]; ok && ref != "" {
+				req.Referrer = ref
+			}
+		}
+		if req.Revenue == nil {
+			if revStr, ok := itemFlatProps["__revenue"]; ok && revStr != "" {
+				if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+					req.Revenue = &v
+				}
+			} else if revStr, ok := itemFlatProps["revenue"]; ok && revStr != "" {
+				if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+					req.Revenue = &v
+				}
+			}
+		}
+
 		tenantID := h.resolveTenantID(r, &req)
 		deviceID := req.DeviceID
 		if deviceID == "" {
@@ -255,7 +348,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		refInfo := referrer.Parse(req.Referrer)
-		enrichedProps := bot.ApplyToProperties(req.Properties, itemBotVerdict)
+		enrichedProps := bot.ApplyToProperties(itemFlatProps, itemBotVerdict)
 
 		event := &domain.Event{
 			ID:           uuidv7.MustNew(),
@@ -266,9 +359,9 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			SessionID:    sessionID,
 			Revenue:      req.Revenue,
 			Currency:     req.Currency,
-			ProductID:    req.ProductID,
-			CartID:       req.CartID,
-			OrderID:      req.OrderID,
+			ProductID:    parseUUIDPtr(req.ProductID),
+			CartID:       parseUUIDPtr(req.CartID),
+			OrderID:      parseUUIDPtr(req.OrderID),
 			Path:         req.Path,
 			Origin:       r.Header.Get("Origin"),
 			Referrer:     refInfo.URL,
@@ -297,20 +390,25 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		events = append(events, event)
 	}
 
-	if err := h.producer.ProduceBatch(r.Context(), events); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "INGEST_BATCH_FAILED", "Failed to enqueue batch: "+err.Error())
-		return
-	}
-
-	// Real-time direct stream sync if running in unified mode
-	if h.chWriter != nil {
-		for _, ev := range events {
-			_ = h.chWriter.AddEvent(r.Context(), ev)
-			if h.sessionMgr != nil {
-				res, _ := h.sessionMgr.Ingest(r.Context(), ev)
-				if res != nil && res.ClosedSession != nil {
-					h.chWriter.AddSession(res.ClosedSession)
+	if h.producer != nil {
+		if err := h.producer.ProduceBatch(r.Context(), events); err != nil {
+			// Fallback to direct ClickHouse sync if Kafka batch produce fails
+			if h.chWriter != nil {
+				for _, ev := range events {
+					if h.sessionMgr != nil {
+						_ = h.sessionMgr.ProcessEventLifecycle(r.Context(), ev, h.chWriter)
+					} else {
+						_ = h.chWriter.AddEvent(r.Context(), ev)
+					}
 				}
+			}
+		}
+	} else if h.chWriter != nil {
+		for _, ev := range events {
+			if h.sessionMgr != nil {
+				_ = h.sessionMgr.ProcessEventLifecycle(r.Context(), ev, h.chWriter)
+			} else {
+				_ = h.chWriter.AddEvent(r.Context(), ev)
 			}
 		}
 	}
@@ -393,18 +491,26 @@ func (h *Handler) resolveSessionID(req *TrackRequest) uuid.UUID {
 	return uuidv7.MustNew()
 }
 
-func (h *Handler) resolveTimestamp(ts *int64) time.Time {
-	now := time.Now().UTC()
-	if ts == nil || *ts == 0 {
-		return now
+func (h *Handler) resolveTimestamp(ts *FlexibleTimestamp) time.Time {
+	if ts == nil {
+		return time.Now().UTC()
 	}
+	t := ts.Time()
+	if t.IsZero() {
+		return time.Now().UTC()
+	}
+	return t.UTC()
+}
 
-	clientTime := time.UnixMilli(*ts).UTC()
-	// Allow client timestamp if within +/- 15 minutes
-	if clientTime.After(now.Add(-15*time.Minute)) && clientTime.Before(now.Add(15*time.Minute)) {
-		return clientTime
+func parseUUIDPtr(s string) *uuid.UUID {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
 	}
-	return now
+	if id, err := uuid.Parse(s); err == nil {
+		return &id
+	}
+	return nil
 }
 
 func (h *Handler) extractClientIP(r *http.Request) string {

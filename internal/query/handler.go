@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/postgres"
 	"openanalytics/pkg/httputil"
@@ -51,6 +52,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			r.Get("/live", h.HandleLiveVisitors)
 			r.Get("/shopper/{id}", h.HandleShopperJourney)
 			r.Get("/intents", h.HandleIntents)
+			r.Get("/insights", h.HandleGetInsights)
+			r.Post("/insights/compute", h.HandleComputeInsights)
 		})
 
 		// Dashboard Metadata APIs
@@ -652,4 +655,50 @@ func (h *Handler) HandleIntents(w http.ResponseWriter, r *http.Request) {
 	})
 
 	httputil.JSON(w, http.StatusOK, results)
+}
+
+// HandleGetInsights returns pre-computed automated anomaly and intelligence cards for the UI.
+func (h *Handler) HandleGetInsights(w http.ResponseWriter, r *http.Request) {
+	shopIDStr := r.URL.Query().Get("shop_id")
+	if shopIDStr == "" {
+		shopIDStr = r.Header.Get("X-Shop-Id")
+	}
+
+	shopID, err := uuid.Parse(shopIDStr)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id UUID is required")
+		return
+	}
+
+	limit := 10
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	cards, err := h.queryService.GetInsights(r.Context(), shopID, limit)
+	if err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "INSIGHTS_QUERY_FAILED", err.Error())
+		return
+	}
+
+	if cards == nil {
+		cards = []*cron.InsightCard{}
+	}
+
+	httputil.JSON(w, http.StatusOK, cards)
+}
+
+// HandleComputeInsights triggers immediate re-computation of automated intelligence cards.
+func (h *Handler) HandleComputeInsights(w http.ResponseWriter, r *http.Request) {
+	if err := cron.ComputeDailyInsights(r.Context(), h.queryService.Conn()); err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "INSIGHTS_COMPUTE_FAILED", err.Error())
+		return
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]string{
+		"status":  "success",
+		"message": "Daily insights computation completed successfully",
+	})
 }

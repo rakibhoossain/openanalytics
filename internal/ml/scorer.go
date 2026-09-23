@@ -100,10 +100,10 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 
 	if event.Name == "page_view" || event.Name == "view_product" {
 		pipe.HIncrBy(ctx, featureKey, "views", 1)
-		if event.ProductID != "" {
+		if event.ProductID != nil {
 			// Track distinct products via Redis Set
 			prodSetKey := fmt.Sprintf("shopper:prods:%s:%s", event.ShopID.String(), event.DeviceID)
-			pipe.SAdd(ctx, prodSetKey, event.ProductID)
+			pipe.SAdd(ctx, prodSetKey, event.ProductID.String())
 			pipe.Expire(ctx, prodSetKey, 45*time.Minute)
 		}
 	} else if event.Name == "add_to_cart" {

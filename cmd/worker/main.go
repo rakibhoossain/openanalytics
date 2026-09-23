@@ -13,6 +13,7 @@ import (
 
 	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/config"
+	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/session"
@@ -67,8 +68,16 @@ func main() {
 	}()
 	log.Printf("[ClickHouse] Native TCP batch writer connected to %s (DB: %s)", cfg.ClickHouseAddr, cfg.ClickHouseDatabase)
 
-	// 3. Initialize Distributed Session State Machine
+	// 3. Initialize Distributed Session State Machine & Background Reaper
 	sessionMgr := session.NewManager(rdb, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute)
+	sessionReaper := session.NewReaper(rdb, chWriter, time.Duration(cfg.RedisSessionTTLMinutes)*time.Minute, 1*time.Minute)
+	sessionReaper.Start(ctx)
+
+	// 3b. Initialize Background Reporting & Intelligence Cron Schedulers
+	if chWriter.Conn() != nil {
+		reportingCron := cron.NewScheduler(chWriter.Conn())
+		reportingCron.Start(ctx)
+	}
 
 	// 4. Initialize Kafka Consumer Group Reader
 	consumer := kafka.NewConsumer(kafka.ConsumerConfig{
@@ -79,21 +88,9 @@ func main() {
 	})
 	defer consumer.Close()
 
-	// 5. Event processing pipeline
+	// 5. Event processing pipeline (session_start, session_end, and raw events)
 	eventHandler := func(ctx context.Context, event *domain.Event) error {
-		// A. Process session state machine in Redis
-		res, err := sessionMgr.Ingest(ctx, event)
-		if err != nil {
-			log.Printf("[Session] Warning: session ingest error: %v", err)
-		}
-
-		// B. If a prior session timed out and closed, buffer the closed session record for ClickHouse
-		if res != nil && res.ClosedSession != nil {
-			chWriter.AddSession(res.ClosedSession)
-		}
-
-		// C. Buffer event for columnar ClickHouse batch insertion
-		return chWriter.AddEvent(ctx, event)
+		return sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
 	}
 
 	// 6. Launch Consumer Loop in background goroutine

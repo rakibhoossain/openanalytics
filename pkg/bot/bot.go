@@ -14,14 +14,29 @@ type Suspicion struct {
 	Reasons []string `json:"reasons,omitempty"`
 }
 
-// TODO(accuracy): Expand bot detection to achieve full parity with OpenPanel:
-// `/Users/rakib/Projects/analytics/openpanel/apps/api/src/bots/suspicion.ts` and
-// `/Users/rakib/Projects/analytics/openpanel/apps/api/src/bots/header-signals.ts`:
-//   1. Multi-category scoring: Only flag when >= 2 distinct categories fire (e.g. Datacenter IP + Missing Sec-CH-UA).
-//   2. Client Hints verification: Inspect `Sec-CH-UA`, `Sec-CH-UA-Mobile`, `Sec-CH-UA-Platform`.
-//   3. Fetch Metadata checks: `Sec-Fetch-Site`, `Sec-Fetch-Mode`, `Sec-Fetch-Dest`.
-//   4. Missing standard browser headers (e.g. missing `Accept-Language` or `Accept-Encoding`).
-//   5. Whitelist trusted server-to-server webhook traffic (verified via store API keys).
+// KnownCrawlers contains lowercase patterns for major search engine spiders and scrapers.
+// Matches OpenPanel's isBotHook to prevent web crawlers from polluting conversion funnels.
+var KnownCrawlers = []string{
+	"googlebot", "bingbot", "bingpreview", "slurp", "duckduckbot", "baiduspider",
+	"yandexbot", "sogou", "exabot", "facebot", "facebookexternalhit", "twitterbot",
+	"linkedinbot", "pinterest", "applebot", "semrushbot", "ahrefsbot", "mj12bot",
+	"dotbot", "petalbot", "screaming frog", "seznambot", "archive.org_bot", "ia_archiver",
+	"bytespider", "gptbot", "chatgpt-user", "ccbot", "anthropic-ai", "claude-web",
+}
+
+// IsKnownCrawler returns true if the User-Agent represents a known search spider or web crawler.
+func IsKnownCrawler(userAgent string) bool {
+	if userAgent == "" {
+		return false
+	}
+	lower := strings.ToLower(userAgent)
+	for _, pattern := range KnownCrawlers {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
 
 // Detect evaluates an HTTP request, ASN metadata, and User-Agent to determine bot suspicion.
 func Detect(r *http.Request, asnInfo *geo.ASNInfo, uaInfo uaparser.UAInfo) Suspicion {

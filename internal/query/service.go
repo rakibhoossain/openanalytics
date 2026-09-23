@@ -10,6 +10,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 
+	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
 )
 
@@ -395,17 +396,17 @@ func (s *Service) GetShopperJourney(ctx context.Context, tenantID, shopID uuid.U
 	var events []domain.Event
 	for rows.Next() {
 		var ev domain.Event
-		var rev float64
+		var revCents int64
 		if err := rows.Scan(
 			&ev.ID, &ev.TenantID, &ev.ShopID, &ev.Name, &ev.DeviceID, &ev.CustomerID, &ev.SessionID,
-			&rev, &ev.Currency, &ev.ProductID, &ev.CartID, &ev.OrderID,
+			&revCents, &ev.Currency, &ev.ProductID, &ev.CartID, &ev.OrderID,
 			&ev.Path, &ev.Origin, &ev.Referrer, &ev.ReferrerName, &ev.ReferrerType,
 			&ev.OS, &ev.Browser, &ev.Device, &ev.Country, &ev.City, &ev.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
-		if rev > 0 {
-			ev.Revenue = &rev
+		if revCents > 0 {
+			ev.Revenue = &revCents
 		}
 		events = append(events, ev)
 	}
@@ -421,4 +422,60 @@ func (s *Service) GetShopperJourney(ctx context.Context, tenantID, shopID uuid.U
 		Events:     events,
 		Sessions:   nil, // Populated via sessions query if needed
 	}, nil
+}
+
+// Conn returns the underlying ClickHouse native driver connection.
+func (s *Service) Conn() driver.Conn {
+	return s.conn
+}
+
+// GetInsights retrieves the latest automated anomaly and intelligence cards for a shop.
+func (s *Service) GetInsights(ctx context.Context, shopID uuid.UUID, limit int) ([]*cron.InsightCard, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			id, shop_id, tenant_id, module_key, dimension_key, window_kind,
+			title, summary, direction, change_pct, current_val, compare_val,
+			impact_score, created_at
+		FROM %s.project_insights
+		WHERE shop_id = ?
+		ORDER BY impact_score DESC, created_at DESC
+		LIMIT ?;
+	`, s.database)
+
+	rows, err := s.conn.Query(ctx, query, shopID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query project insights: %w", err)
+	}
+	defer rows.Close()
+
+	var cards []*cron.InsightCard
+	for rows.Next() {
+		var c cron.InsightCard
+		err := rows.Scan(
+			&c.ID,
+			&c.ShopID,
+			&c.TenantID,
+			&c.ModuleKey,
+			&c.DimensionKey,
+			&c.WindowKind,
+			&c.Title,
+			&c.Summary,
+			&c.Direction,
+			&c.ChangePct,
+			&c.CurrentVal,
+			&c.CompareVal,
+			&c.ImpactScore,
+			&c.CreatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan insight card: %w", err)
+		}
+		cards = append(cards, &c)
+	}
+
+	return cards, nil
 }
