@@ -1,0 +1,105 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: op_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: openpanel
+      POSTGRES_PASSWORD: openpanel
+      POSTGRES_DB: openpanel
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openpanel"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.8.8
+    container_name: op_clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: openpanel
+      CLICKHOUSE_PASSWORD: openpanel
+      CLICKHOUSE_DB: openpanel
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./deploy/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "openpanel", "--password", "openpanel", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: op_redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    command: redis-server --notify-keyspace-events Ex
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate:v7
+    container_name: op_geoipupdate
+    restart: unless-stopped
+    environment:
+      GEOIPUPDATE_ACCOUNT_ID: 1324838
+      GEOIPUPDATE_LICENSE_KEY: your_mmk
+      GEOIPUPDATE_EDITION_IDS: "GeoLite2-City GeoLite2-ASN"
+      GEOIPUPDATE_FREQUENCY: 168
+    volumes:
+      # Mounts directly into the host data folder so Go reads the same directory
+      - ./data/geo:/usr/share/GeoIP
+
+  # Optional: Go API container (Profile "app" for future containerized deployment)
+  api:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile.ingest
+    container_name: op_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      INGEST_PORT: 8080
+      DATABASE_URL: postgres://openpanel:openpanel@postgres:5432/openpanel?sslmode=disable
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_USERNAME: openpanel
+      CLICKHOUSE_PASSWORD: openpanel
+      CLICKHOUSE_DATABASE: openpanel
+      REDIS_ADDR: redis:6379
+      GEOIP_DATA_DIR: /usr/share/GeoIP
+    volumes:
+      - ./data/geo:/usr/share/GeoIP:ro
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  redis_data:

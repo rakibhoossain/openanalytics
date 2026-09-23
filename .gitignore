@@ -1,0 +1,30 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Environment & local secrets
+.env
+.env.local
+
+# GeoIP downloaded database files
+data/geo/*.mmdb
+data/geo/*.tmp
+data/geo/*.tar.gz
+
+# Machine learning model binaries (keep tracking script & metadata)
+*.bin
+*.model
+data/models/*.onnx
+data/geo/
+
+# OS metadata
+.DS_Store
+Thumbs.db
