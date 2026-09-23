@@ -690,7 +690,7 @@ body {
   flex-direction: column;
   gap: 8px;
   margin-top: 8px;
-  max-height: 240px;
+  max-height: 480px;
   overflow-y: auto;
 }
 

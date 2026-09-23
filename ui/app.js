@@ -143,8 +143,10 @@ function syncInputs() {
   if (el.shopInput) state.shopId = el.shopInput.value.trim();
 }
 
-// Router & View Switcher
 function switchView(viewName) {
+  if (viewName === 'ml') viewName = 'ml-intent';
+  if (viewName === 'journey') viewName = 'shopper-journey';
+  if (viewName === 'lab' || viewName === 'test') viewName = 'simulator';
   if (!viewMeta[viewName]) viewName = 'overview';
   state.activeView = viewName;
 

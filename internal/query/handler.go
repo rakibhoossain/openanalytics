@@ -92,6 +92,10 @@ func (h *Handler) HandleTrends(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
+	if h.queryService == nil {
+		httputil.Error(w, http.StatusServiceUnavailable, "CLICKHOUSE_UNAVAILABLE", "ClickHouse query service is not connected")
+		return
+	}
 
 	metric := r.URL.Query().Get("metric")
 	timeRange := r.URL.Query().Get("time_range")
@@ -139,6 +143,10 @@ func (h *Handler) HandleFunnel(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "valid tenant_id and shop_id are required")
 		return
 	}
+	if h.queryService == nil {
+		httputil.Error(w, http.StatusServiceUnavailable, "CLICKHOUSE_UNAVAILABLE", "ClickHouse query service is not connected")
+		return
+	}
 
 	result, err := h.queryService.GetFunnel(r.Context(), tenantID, shopID, req.TimeRange, req.Steps)
 	if err != nil {
@@ -154,6 +162,10 @@ func (h *Handler) HandleLiveVisitors(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
 		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if h.queryService == nil {
+		httputil.Error(w, http.StatusServiceUnavailable, "CLICKHOUSE_UNAVAILABLE", "ClickHouse query service is not connected")
 		return
 	}
 
@@ -178,6 +190,10 @@ func (h *Handler) HandleShopperJourney(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
 		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if h.queryService == nil {
+		httputil.Error(w, http.StatusServiceUnavailable, "CLICKHOUSE_UNAVAILABLE", "ClickHouse query service is not connected")
 		return
 	}
 

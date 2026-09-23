@@ -67,3 +67,7 @@ ENGINE = ReplacingMergeTree(ended_at)
 PARTITION BY toYYYYMM(started_at)
 ORDER BY (tenant_id, shop_id, toDate(started_at), device_id, id)
 SETTINGS index_granularity = 8192;
+
+-- Default Database Views (ensures DBeaver, IDEs, and tools querying 'default' DB see all data)
+CREATE VIEW IF NOT EXISTS default.events AS SELECT * FROM openpanel.events;
+CREATE VIEW IF NOT EXISTS default.sessions AS SELECT * FROM openpanel.sessions;
