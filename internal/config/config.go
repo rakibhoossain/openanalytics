@@ -60,7 +60,7 @@ func Load() *Config {
 		ClickHouseUsername: getEnv("CLICKHOUSE_USERNAME", "openpanel"),
 		ClickHousePassword: getEnv("CLICKHOUSE_PASSWORD", "openpanel"),
 
-		RedisAddr:              getEnv("REDIS_ADDR", "127.0.0.1:6379"),
+		RedisAddr:              getEnv("REDIS_ADDR", "127.0.0.1:6380"),
 		RedisPassword:          getEnv("REDIS_PASSWORD", ""),
 		RedisDB:                getEnvAsInt("REDIS_DB", 0),
 		RedisSessionTTLMinutes: getEnvAsInt("REDIS_SESSION_TTL_MINUTES", 30),

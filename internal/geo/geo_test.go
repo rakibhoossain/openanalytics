@@ -38,3 +38,31 @@ func TestNewServiceMissingDir(t *testing.T) {
 		t.Errorf("expected error when database is missing")
 	}
 }
+
+func TestRealGeoDatabaseLookup(t *testing.T) {
+	svc, err := NewService(Config{DataDir: "../../data/geo"})
+	if err != nil {
+		t.Skip("skipping real database test if files not present")
+	}
+	defer svc.Close()
+
+	loc, err := svc.Lookup("8.8.8.8")
+	if err != nil {
+		t.Fatalf("failed to lookup 8.8.8.8: %v", err)
+	}
+	if loc.Country != "US" {
+		t.Errorf("expected country US, got %s", loc.Country)
+	}
+
+	asn, err := svc.LookupASN("8.8.8.8")
+	if err != nil {
+		t.Fatalf("failed to lookup ASN for 8.8.8.8: %v", err)
+	}
+	if asn.AutonomousSystemNumber != 15169 {
+		t.Errorf("expected ASN 15169 (Google), got %d", asn.AutonomousSystemNumber)
+	}
+	if !asn.IsDatacenter {
+		t.Errorf("expected Google 15169 to be classified as datacenter")
+	}
+}
+
