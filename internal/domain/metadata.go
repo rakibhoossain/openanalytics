@@ -56,23 +56,6 @@ type SavedReport struct {
 	UpdatedAt    time.Time       `json:"updated_at"`
 }
 
-// AlertRule represents real-time anomaly detection rules on commerce metrics.
-type AlertRule struct {
-	ID                  uuid.UUID  `json:"id"`
-	TenantID            uuid.UUID  `json:"tenant_id"`
-	ShopID              uuid.UUID  `json:"shop_id"`
-	Name                string     `json:"name"`
-	Metric              string     `json:"metric"` // 'error_rate', 'cart_abandonment_spike'
-	ConditionOperator   string     `json:"condition_operator"` // '>', '<', '>='
-	ThresholdValue      float64    `json:"threshold_value"`
-	WindowMinutes       int        `json:"window_minutes"`
-	NotificationChannel string     `json:"notification_channel"` // 'webhook', 'email', 'slack'
-	ChannelTarget       string     `json:"channel_target"`
-	IsEnabled           bool       `json:"is_enabled"`
-	LastTriggeredAt     *time.Time `json:"last_triggered_at,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-}
-
 // --- Analytical Query Contract Types ---
 
 // TrendDataPoint represents a single aggregated bucket in a time series.

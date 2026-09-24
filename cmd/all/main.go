@@ -162,7 +162,34 @@ func main() {
 	}()
 
 	// ------------------------------------------------------------------
-	// 4. Start Stream Worker (Kafka Partition Consumer)
+	// 4. Start Query Engine & WebSocket Realtime Hub (:8081)
+	// ------------------------------------------------------------------
+	pgRepo, err := postgres.NewRepository(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Printf("[Query Engine] Warning: PostgreSQL init error: %v", err)
+	} else {
+		defer pgRepo.Close()
+	}
+
+	qs, err := query.NewService(ctx, query.Config{
+		Addr:     cfg.ClickHouseAddr,
+		Database: cfg.ClickHouseDatabase,
+		Username: cfg.ClickHouseUsername,
+		Password: cfg.ClickHousePassword,
+	})
+	if err != nil {
+		log.Printf("[Query Engine] Warning: ClickHouse query service init error: %v", err)
+	} else {
+		defer qs.Close()
+	}
+
+	wsHub := query.NewWebSocketHub(rdb, qs)
+	wsHub.Start(ctx)
+
+	queryHandler := query.NewHandler(qs, pgRepo).WithRedis(rdb).WithWSHub(wsHub)
+
+	// ------------------------------------------------------------------
+	// 5. Start Stream Worker (Kafka Partition Consumer)
 	// ------------------------------------------------------------------
 	workerConsumer := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:       cfg.KafkaBrokers,
@@ -175,18 +202,28 @@ func main() {
 	go func() {
 		log.Printf("[Stream Worker] Kafka consumer loop active for topic %s", cfg.KafkaEventsTopic)
 		_ = workerConsumer.ConsumeLoop(ctx, func(ctx context.Context, event *domain.Event) error {
+			var procErr error
 			if sessionMgr != nil && chWriter != nil {
-				return sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
+				procErr = sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
+			} else if chWriter != nil {
+				procErr = chWriter.AddEvent(ctx, event)
 			}
-			if chWriter != nil {
-				return chWriter.AddEvent(ctx, event)
+
+			if procErr == nil && wsHub != nil {
+				shopKey := event.ShopID.String()
+				wsHub.BroadcastEvents(shopKey, 1)
+				if sessionMgr != nil {
+					if activeCount, aerr := sessionMgr.GetActiveSessionsCount(ctx, event.ShopID); aerr == nil {
+						wsHub.BroadcastVisitors(shopKey, activeCount)
+					}
+				}
 			}
-			return nil
+			return procErr
 		})
 	}()
 
 	// ------------------------------------------------------------------
-	// 4. Start Behavioral ML Scorer Worker
+	// 6. Start Behavioral ML Scorer Worker
 	// ------------------------------------------------------------------
 	mlScorer, err := ml.NewScorer(cfg.MLModelPath, rdb)
 	if err == nil {
@@ -212,28 +249,8 @@ func main() {
 	}
 
 	// ------------------------------------------------------------------
-	// 5. Start Query Engine & UI Dashboard (:8081)
+	// 7. Configure UI Dashboard & Query Routes (:8081)
 	// ------------------------------------------------------------------
-	pgRepo, err := postgres.NewRepository(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Printf("[Query Engine] Warning: PostgreSQL init error: %v", err)
-	} else {
-		defer pgRepo.Close()
-	}
-
-	qs, err := query.NewService(ctx, query.Config{
-		Addr:     cfg.ClickHouseAddr,
-		Database: cfg.ClickHouseDatabase,
-		Username: cfg.ClickHouseUsername,
-		Password: cfg.ClickHousePassword,
-	})
-	if err != nil {
-		log.Printf("[Query Engine] Warning: ClickHouse query service init error: %v", err)
-	} else {
-		defer qs.Close()
-	}
-
-	queryHandler := query.NewHandler(qs, pgRepo).WithRedis(rdb)
 	queryRouter := chi.NewRouter()
 	queryRouter.Use(middleware.RequestID)
 	queryRouter.Use(middleware.RealIP)

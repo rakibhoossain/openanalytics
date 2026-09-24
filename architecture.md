@@ -385,25 +385,6 @@ CREATE TABLE IF NOT EXISTS saved_reports (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
--- Alert Rules (Real-time monitoring on conversion or traffic anomalies)
-CREATE TABLE IF NOT EXISTS alert_rules (
-    id UUID PRIMARY KEY,                     -- UUIDv7
-    tenant_id UUID NOT NULL,
-    shop_id UUID NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    metric VARCHAR(100) NOT NULL,            -- 'error_rate', 'cart_abandonment_spike'
-    condition_operator VARCHAR(10) NOT NULL, -- '>', '<', '>='
-    threshold_value DOUBLE PRECISION NOT NULL,
-    window_minutes INT NOT NULL DEFAULT 15,
-    notification_channel VARCHAR(50) NOT NULL, -- 'webhook', 'email', 'slack'
-    channel_target TEXT NOT NULL,            -- URL or email address
-    is_enabled BOOLEAN DEFAULT TRUE,
-    last_triggered_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_alert_rules_tenant_shop ON alert_rules (tenant_id, shop_id);
 ```
 
 ---

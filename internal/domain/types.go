@@ -65,3 +65,91 @@ type Session struct {
 	HasPurchase  bool   `json:"has_purchase"`
 	TotalRevenue int64  `json:"total_revenue"` // Stored in integer cents
 }
+
+// OverviewMetrics holds current and previous period comparison metric values.
+type OverviewMetrics struct {
+	BounceRate             float64  `json:"bounce_rate"`
+	UniqueVisitors         int64    `json:"unique_visitors"`
+	TotalSessions          int64    `json:"total_sessions"`
+	AvgSessionDuration     float64  `json:"avg_session_duration"`
+	TotalScreenViews       int64    `json:"total_screen_views"`
+	ViewsPerSession        float64  `json:"views_per_session"`
+	TotalRevenue           int64    `json:"total_revenue"` // In cents
+	PrevBounceRate         *float64 `json:"prev_bounce_rate,omitempty"`
+	PrevUniqueVisitors     *int64   `json:"prev_unique_visitors,omitempty"`
+	PrevTotalSessions      *int64   `json:"prev_total_sessions,omitempty"`
+	PrevAvgSessionDuration *float64 `json:"prev_avg_session_duration,omitempty"`
+	PrevTotalScreenViews   *int64   `json:"prev_total_screen_views,omitempty"`
+	PrevViewsPerSession    *float64 `json:"prev_views_per_session,omitempty"`
+	PrevTotalRevenue       *int64   `json:"prev_total_revenue,omitempty"`
+}
+
+// OverviewSeriesPoint represents a single interval bucket in an overview timeline.
+type OverviewSeriesPoint struct {
+	Date                   string   `json:"date"`
+	BounceRate             float64  `json:"bounce_rate"`
+	UniqueVisitors         int64    `json:"unique_visitors"`
+	TotalSessions          int64    `json:"total_sessions"`
+	AvgSessionDuration     float64  `json:"avg_session_duration"`
+	TotalScreenViews       int64    `json:"total_screen_views"`
+	ViewsPerSession        float64  `json:"views_per_session"`
+	TotalRevenue           int64    `json:"total_revenue"` // In cents
+	PrevBounceRate         *float64 `json:"prev_bounce_rate,omitempty"`
+	PrevUniqueVisitors     *int64   `json:"prev_unique_visitors,omitempty"`
+	PrevTotalSessions      *int64   `json:"prev_total_sessions,omitempty"`
+	PrevAvgSessionDuration *float64 `json:"prev_avg_session_duration,omitempty"`
+	PrevTotalScreenViews   *int64   `json:"prev_total_screen_views,omitempty"`
+	PrevViewsPerSession    *float64 `json:"prev_views_per_session,omitempty"`
+	PrevTotalRevenue       *int64   `json:"prev_total_revenue,omitempty"`
+}
+
+// OverviewStatsResult packages both current/previous totals and time series.
+type OverviewStatsResult struct {
+	Metrics OverviewMetrics       `json:"metrics"`
+	Series  []OverviewSeriesPoint `json:"series"`
+}
+
+// TopItem represents an aggregated dimension item (e.g. source, page, device).
+type TopItem struct {
+	Name      string `json:"name"`
+	Sessions  int64  `json:"sessions"`
+	Pageviews int64  `json:"pageviews"`
+	Revenue   int64  `json:"revenue"` // In cents
+}
+
+// TopGenericSeriesResult represents top items with their breakdown series.
+type TopGenericSeriesResult struct {
+	Items  []TopItem                `json:"items"`
+	Series []map[string]interface{} `json:"series"`
+}
+
+// TopEventItem represents an aggregated event count and unique user reach.
+type TopEventItem struct {
+	Name           string `json:"name"`
+	Count          int64  `json:"count"`
+	UniqueVisitors int64  `json:"unique_visitors"`
+}
+
+// MinuteCount represents visitor and session activity in a single minute.
+type MinuteCount struct {
+	Minute       string               `json:"minute"`
+	SessionCount int64                `json:"sessionCount"`
+	VisitorCount int64                `json:"visitorCount"`
+	Timestamp    int64                `json:"timestamp"`
+	Time         string               `json:"time"`
+	Referrers    []ReferrerMinuteItem `json:"referrers"`
+}
+
+// ReferrerMinuteItem tracks referrer activity within a minute bucket.
+type ReferrerMinuteItem struct {
+	Referrer string `json:"referrer"`
+	Count    int64  `json:"count"`
+}
+
+// OverviewLiveDataResult encapsulates 30-minute real-time activity for the overview histogram.
+type OverviewLiveDataResult struct {
+	TotalSessions int64                `json:"totalSessions"`
+	MinuteCounts  []MinuteCount        `json:"minuteCounts"`
+	Referrers     []ReferrerMinuteItem `json:"referrers"`
+}
+

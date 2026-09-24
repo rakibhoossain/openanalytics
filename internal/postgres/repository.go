@@ -229,6 +229,34 @@ func (r *Repository) ListWidgets(ctx context.Context, tenantID, shopID, dashboar
 	return widgets, rows.Err()
 }
 
+// GetWidget retrieves a single chart widget by ID.
+func (r *Repository) GetWidget(ctx context.Context, tenantID, shopID, id uuid.UUID) (*domain.ChartWidget, error) {
+	query := `
+		SELECT id, dashboard_id, tenant_id, shop_id, title, chart_type, metric_type,
+		       time_range, group_by, filter_rules, custom_sql, position_x, position_y, width, height,
+		       created_at, updated_at
+		FROM chart_widgets
+		WHERE id = $1 AND tenant_id = $2 AND shop_id = $3
+	`
+	var w domain.ChartWidget
+	var groupBy, customSQL *string
+	err := r.pool.QueryRow(ctx, query, id, tenantID, shopID).Scan(
+		&w.ID, &w.DashboardID, &w.TenantID, &w.ShopID, &w.Title, &w.ChartType, &w.MetricType,
+		&w.TimeRange, &groupBy, &w.FilterRules, &customSQL, &w.PositionX, &w.PositionY, &w.Width, &w.Height,
+		&w.CreatedAt, &w.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if groupBy != nil {
+		w.GroupBy = *groupBy
+	}
+	if customSQL != nil {
+		w.CustomSQL = *customSQL
+	}
+	return &w, nil
+}
+
 // DeleteWidget deletes a chart widget.
 func (r *Repository) DeleteWidget(ctx context.Context, tenantID, shopID, id uuid.UUID) error {
 	query := `DELETE FROM chart_widgets WHERE id = $1 AND tenant_id = $2 AND shop_id = $3`
@@ -296,57 +324,4 @@ func (r *Repository) ListReports(ctx context.Context, tenantID, shopID uuid.UUID
 		reports = append(reports, &sr)
 	}
 	return reports, rows.Err()
-}
-
-// --- Alert Rules Operations ---
-
-// CreateAlert creates an anomaly detection alert rule.
-func (r *Repository) CreateAlert(ctx context.Context, alert *domain.AlertRule) error {
-	if alert.ID == uuid.Nil {
-		alert.ID = uuidv7.MustNew()
-	}
-	alert.CreatedAt = time.Now().UTC()
-
-	query := `
-		INSERT INTO alert_rules (
-			id, tenant_id, shop_id, name, metric, condition_operator, threshold_value,
-			window_minutes, notification_channel, channel_target, is_enabled, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-	`
-	_, err := r.pool.Exec(ctx, query,
-		alert.ID, alert.TenantID, alert.ShopID, alert.Name, alert.Metric, alert.ConditionOperator,
-		alert.ThresholdValue, alert.WindowMinutes, alert.NotificationChannel, alert.ChannelTarget,
-		alert.IsEnabled, alert.CreatedAt,
-	)
-	return err
-}
-
-// ListAlerts lists alert rules for a merchant shop.
-func (r *Repository) ListAlerts(ctx context.Context, tenantID, shopID uuid.UUID) ([]*domain.AlertRule, error) {
-	query := `
-		SELECT id, tenant_id, shop_id, name, metric, condition_operator, threshold_value,
-		       window_minutes, notification_channel, channel_target, is_enabled, last_triggered_at, created_at
-		FROM alert_rules
-		WHERE tenant_id = $1 AND shop_id = $2
-		ORDER BY created_at DESC
-	`
-	rows, err := r.pool.Query(ctx, query, tenantID, shopID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var alerts []*domain.AlertRule
-	for rows.Next() {
-		var a domain.AlertRule
-		if err := rows.Scan(
-			&a.ID, &a.TenantID, &a.ShopID, &a.Name, &a.Metric, &a.ConditionOperator,
-			&a.ThresholdValue, &a.WindowMinutes, &a.NotificationChannel, &a.ChannelTarget,
-			&a.IsEnabled, &a.LastTriggeredAt, &a.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		alerts = append(alerts, &a)
-	}
-	return alerts, rows.Err()
 }

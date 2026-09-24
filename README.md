@@ -4,6 +4,8 @@ High-throughput, multi-tenant analytics and behavioral machine-learning platform
 
 `OpenAnalytics` replaces the heavy Node.js ingestion and worker layers of OpenPanel with a blazing-fast **Golang Data Plane (built on Go-Chi `github.com/go-chi/chi/v5`)**, stream processing via **Kafka / Redpanda**, horizontally scalable multi-instance workers, columnar analytical storage in **ClickHouse**, persistent report/dashboard metadata in **PostgreSQL**, distributed session state in **Redis**, and real-time shopper intent prediction using **LightGBM / ONNX**.
 
+> 📘 **Architectural Analysis**: For a detailed component-by-component comparison, architecture diagrams, and parity roadmap, see [**OpenPanel vs. OpenAnalytics Architectural Blueprint**](file:///Users/rakib/Projects/analytics/openanalytics/OPENPANEL_VS_OPENANALYTICS.md).
+
 ---
 
 ## Infrastructure Topology

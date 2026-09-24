@@ -343,3 +343,14 @@ func (m *Manager) ProcessEventLifecycle(ctx context.Context, event *domain.Event
 
 	return nil
 }
+
+// GetActiveSessionsCount returns the count of shoppers active within the session timeout window.
+func (m *Manager) GetActiveSessionsCount(ctx context.Context, shopID uuid.UUID) (int64, error) {
+	if m.rdb == nil {
+		return 0, nil
+	}
+	wallclockKey := fmt.Sprintf("session:wallclock:%s", shopID.String())
+	minScore := fmt.Sprintf("%d", time.Now().Add(-m.sessionTimeout).UnixMilli())
+	maxScore := "+inf"
+	return m.rdb.ZCount(ctx, wallclockKey, minScore, maxScore).Result()
+}
