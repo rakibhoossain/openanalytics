@@ -16,7 +16,6 @@ type Config struct {
 	MetricsPort string
 
 	// Storage
-	DatabaseURL        string // PostgreSQL
 	ClickHouseAddr     string // ClickHouse Native TCP
 	ClickHouseDatabase string
 	ClickHouseUsername string
@@ -54,7 +53,6 @@ func Load() *Config {
 		QueryPort:   getEnv("QUERY_PORT", "8081"),
 		MetricsPort: getEnv("METRICS_PORT", "9090"),
 
-		DatabaseURL:        getEnv("DATABASE_URL", "postgresql://openpanel:openpanel@localhost:5435/openpanel?sslmode=disable"),
 		ClickHouseAddr:     getEnv("CLICKHOUSE_ADDR", "127.0.0.1:9000"),
 		ClickHouseDatabase: getEnv("CLICKHOUSE_DATABASE", "openpanel"),
 		ClickHouseUsername: getEnv("CLICKHOUSE_USERNAME", "openpanel"),

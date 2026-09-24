@@ -1,23 +1,4 @@
 services:
-  postgres:
-    image: postgres:18.3
-    container_name: op_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: openpanel
-      POSTGRES_PASSWORD: openpanel
-      POSTGRES_DB: openpanel
-    ports:
-      - "5435:5432"
-    volumes:
-      - ./data/postgres:/var/lib/postgresql
-      - ./deploy/postgres/migrations:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U openpanel"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   clickhouse:
     image: clickhouse/clickhouse-server:26.8.8.8
     container_name: op_clickhouse
@@ -79,8 +60,6 @@ services:
     container_name: op_api
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       clickhouse:
         condition: service_healthy
       redis:
@@ -89,7 +68,6 @@ services:
       - "8080:8080"
     environment:
       INGEST_PORT: 8080
-      DATABASE_URL: postgres://openpanel:openpanel@postgres:5432/openpanel?sslmode=disable
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_USERNAME: openpanel
       CLICKHOUSE_PASSWORD: openpanel
@@ -100,6 +78,5 @@ services:
       - ./data/geo:/usr/share/GeoIP:ro
 
 volumes:
-  postgres_data:
   clickhouse_data:
   redis_data:
