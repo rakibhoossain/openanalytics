@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/kafka"
 )
@@ -132,5 +131,41 @@ func TestHandleDeviceID(t *testing.T) {
 	}
 }
 
-// Suppress unused domain import
-var _ = domain.Event{}
+func TestCrawlerBypass(t *testing.T) {
+	handler := NewHandler(Config{Salt: "test_salt"})
+	shopID := uuid.Must(uuid.NewV7())
+
+	crawlers := []string{
+		"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+		"Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/534+ (KHTML, like Gecko) BingPreview/1.0b",
+		"Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GPTBot/1.2; +https://openai.com/gptbot)",
+		"Screaming Frog SEO Spider/19.0",
+	}
+
+	for _, ua := range crawlers {
+		payload := map[string]interface{}{
+			"shop_id": shopID.String(),
+			"name":    "view_product",
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", ua)
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status 202 Accepted for crawler %q, got %d", ua, w.Code)
+		}
+
+		var resp struct {
+			Success bool          `json:"success"`
+			Data    TrackResponse `json:"data"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp.Data.Status != "crawler_accepted" {
+			t.Errorf("expected status 'crawler_accepted' for crawler %q, got %q", ua, resp.Data.Status)
+		}
+	}
+}

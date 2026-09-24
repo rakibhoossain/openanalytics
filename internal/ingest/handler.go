@@ -17,12 +17,12 @@ import (
 	"openanalytics/internal/geo"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/session"
-	"openanalytics/pkg/bot"
 	"openanalytics/pkg/hash"
 	"openanalytics/pkg/httputil"
-	"openanalytics/pkg/referrer"
-	"openanalytics/pkg/uaparser"
 	"openanalytics/pkg/uuidv7"
+
+	uaparser "github.com/rakibhoossain/ua-parser-go"
+	"github.com/rakibhoossain/ua-parser-go/referrer"
 )
 
 // Handler handles incoming ingestion requests.
@@ -90,7 +90,10 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	if req.UserAgent != "" {
 		uaStr = req.UserAgent
 	}
-	uaInfo := uaparser.Parse(uaStr)
+	uaRes := uaparser.ParseRequest(r)
+	if req.UserAgent != "" {
+		uaRes = uaparser.Parse(req.UserAgent)
+	}
 
 	deviceID := req.DeviceID
 	if deviceID == "" {
@@ -116,7 +119,7 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	// Known Crawler Bypass (matches OpenPanel's isBotHook):
 	// Search engine spiders and scrapers (Googlebot, Bingbot, etc.) are acknowledged
 	// without poisoning Kafka analytics topics or e-commerce conversion funnels.
-	if bot.IsKnownCrawler(uaStr) {
+	if uaparser.IsCrawler(uaStr) {
 		httputil.JSON(w, http.StatusAccepted, TrackResponse{
 			EventID:   "",
 			DeviceID:  deviceID,
@@ -167,16 +170,12 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		asnInfo, _ = h.geoService.LookupASN(clientIP)
 	}
 
-	// Referrer parsing & classification
-	// TODO(accuracy): Expand with 2,800+ search & social referrers from
-	// `openpanel/packages/common/server/referrers/index.ts`
+	// Referrer parsing & classification (Snowplow + curated AI/tech/social domains)
 	refInfo := referrer.Parse(req.Referrer)
 
 	// Bot heuristics & suspicion scoring
-	// TODO(accuracy): Port advanced multi-category heuristics from
-	// `openpanel/apps/api/src/bots/suspicion.ts` and `header-signals.ts`
-	botVerdict := bot.Detect(r, asnInfo, uaInfo)
-	enrichedProps := bot.ApplyToProperties(flatProps, botVerdict)
+	botVerdict := detectBotSuspicion(r, asnInfo, uaRes)
+	enrichedProps := applyBotVerdict(flatProps, botVerdict)
 
 	event := &domain.Event{
 		ID:           uuidv7.MustNew(),
@@ -194,10 +193,10 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		Origin:       r.Header.Get("Origin"),
 		Referrer:     refInfo.URL,
 		ReferrerName: refInfo.Name,
-		ReferrerType: refInfo.Type,
-		OS:           uaInfo.OS,
-		Browser:      uaInfo.Browser,
-		Device:       uaInfo.Device,
+		ReferrerType: string(refInfo.Type),
+		OS:           uaRes.OS.Name,
+		Browser:      uaRes.Browser.Name,
+		Device:       resolveDeviceType(uaRes),
 		Properties:   enrichedProps,
 		CreatedAt:    timestamp,
 	}
@@ -261,7 +260,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := h.extractClientIP(r)
 	uaStr := r.Header.Get("User-Agent")
-	uaInfo := uaparser.Parse(uaStr)
+	uaRes := uaparser.ParseRequest(r)
 
 	var loc *geo.Location
 	var asnInfo *geo.ASNInfo
@@ -270,7 +269,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		asnInfo, _ = h.geoService.LookupASN(clientIP)
 	}
 
-	botVerdict := bot.Detect(r, asnInfo, uaInfo)
+	botVerdict := detectBotSuspicion(r, asnInfo, uaRes)
 
 	events := make([]*domain.Event, 0, len(batch.Events))
 	for _, req := range batch.Events {
@@ -291,9 +290,9 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		if req.UserAgent != "" {
 			eventUA = req.UserAgent
 		}
-		itemUAInfo := uaInfo
+		itemUARes := uaRes
 		if req.UserAgent != "" {
-			itemUAInfo = uaparser.Parse(eventUA)
+			itemUARes = uaparser.Parse(eventUA)
 		}
 
 		// Flatten and normalize properties (supports OpenPanel toDots format)
@@ -344,11 +343,11 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 		itemBotVerdict := botVerdict
 		if req.IP != "" || req.UserAgent != "" {
-			itemBotVerdict = bot.Detect(r, itemASN, itemUAInfo)
+			itemBotVerdict = detectBotSuspicion(r, itemASN, itemUARes)
 		}
 
 		refInfo := referrer.Parse(req.Referrer)
-		enrichedProps := bot.ApplyToProperties(itemFlatProps, itemBotVerdict)
+		enrichedProps := applyBotVerdict(itemFlatProps, itemBotVerdict)
 
 		event := &domain.Event{
 			ID:           uuidv7.MustNew(),
@@ -366,10 +365,10 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			Origin:       r.Header.Get("Origin"),
 			Referrer:     refInfo.URL,
 			ReferrerName: refInfo.Name,
-			ReferrerType: refInfo.Type,
-			OS:           itemUAInfo.OS,
-			Browser:      itemUAInfo.Browser,
-			Device:       itemUAInfo.Device,
+			ReferrerType: string(refInfo.Type),
+			OS:           itemUARes.OS.Name,
+			Browser:      itemUARes.Browser.Name,
+			Device:       resolveDeviceType(itemUARes),
 			Properties:   enrichedProps,
 			CreatedAt:    timestamp,
 		}
@@ -531,4 +530,14 @@ func (h *Handler) extractClientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func resolveDeviceType(res *uaparser.Result) string {
+	if res.IsBot {
+		return "bot"
+	}
+	if res.Device.Type != "" {
+		return string(res.Device.Type)
+	}
+	return "unknown"
 }
