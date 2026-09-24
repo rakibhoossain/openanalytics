@@ -18,7 +18,6 @@ import (
 
 	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
-	"openanalytics/internal/postgres"
 	"openanalytics/pkg/httputil"
 	"openanalytics/pkg/uuidv7"
 )
@@ -26,16 +25,14 @@ import (
 // Handler serves HTTP endpoints for dashboards and analytical queries.
 type Handler struct {
 	queryService *Service
-	pgRepo       *postgres.Repository
 	rdb          *redis.Client
 	wsHub        *WebSocketHub
 }
 
 // NewHandler creates a new Query HTTP Handler.
-func NewHandler(qs *Service, pg *postgres.Repository) *Handler {
+func NewHandler(qs *Service) *Handler {
 	return &Handler{
 		queryService: qs,
-		pgRepo:       pg,
 	}
 }
 
@@ -177,6 +174,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Get("/realtime.referrals", h.HandleTRPCRealtimeReferrals)
 		r.Get("/realtime.activeSessions", h.HandleTRPCRealtimeActiveSessions)
 		r.Get("/realtime.mapBadgeDetails", h.HandleTRPCRealtimeMapBadgeDetails)
+		r.Get("/ml.intents", h.HandleTRPCIntents)
 
 		r.Get("/event.events", h.HandleTRPCEvents)
 		r.Get("/event.conversions", h.HandleTRPCConversions)
@@ -355,7 +353,7 @@ func (h *Handler) HandleShopperJourney(w http.ResponseWriter, r *http.Request) {
 
 // --- Dashboard Metadata Handlers ---
 
-// HandleListDashboards retrieves all dashboards for a shop.
+// HandleListDashboards retrieves all built-in dashboards for a shop.
 func (h *Handler) HandleListDashboards(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
@@ -363,19 +361,10 @@ func (h *Handler) HandleListDashboards(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dashboards, err := h.pgRepo.ListDashboards(r.Context(), tenantID, shopID)
-	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-	if dashboards == nil {
-		dashboards = []*domain.Dashboard{}
-	}
-
-	httputil.JSON(w, http.StatusOK, dashboards)
+	httputil.JSON(w, http.StatusOK, GetBuiltinDashboards(tenantID, shopID))
 }
 
-// HandleCreateDashboard creates a new dashboard.
+// HandleCreateDashboard handles creation (mocked/no-op in built-in mode).
 func (h *Handler) HandleCreateDashboard(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
@@ -384,27 +373,15 @@ func (h *Handler) HandleCreateDashboard(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var d domain.Dashboard
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
+	_ = json.NewDecoder(r.Body).Decode(&d)
 	d.ID = uuidv7.MustNew()
 	d.TenantID = tenantID
 	d.ShopID = shopID
-	if len(d.LayoutGrid) == 0 {
-		d.LayoutGrid = json.RawMessage(`[]`)
-	}
-
-	if err := h.pgRepo.CreateDashboard(r.Context(), &d); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
 
 	httputil.JSON(w, http.StatusCreated, d)
 }
 
-// HandleGetDashboard retrieves a dashboard by ID.
+// HandleGetDashboard retrieves a built-in dashboard by ID.
 func (h *Handler) HandleGetDashboard(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
@@ -412,80 +389,24 @@ func (h *Handler) HandleGetDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid dashboard id")
-		return
-	}
-
-	d, err := h.pgRepo.GetDashboard(r.Context(), tenantID, shopID, id)
-	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-	if d == nil {
-		httputil.Error(w, http.StatusNotFound, "NOT_FOUND", "dashboard not found")
-		return
-	}
-
+	idStr := chi.URLParam(r, "id")
+	d := GetBuiltinDashboardByID(tenantID, shopID, idStr)
 	httputil.JSON(w, http.StatusOK, d)
 }
 
-// HandleUpdateDashboard updates an existing dashboard.
+// HandleUpdateDashboard updates a dashboard (no-op in built-in mode).
 func (h *Handler) HandleUpdateDashboard(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, err := h.extractTenantAndShop(r)
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid dashboard id")
-		return
-	}
-
 	var d domain.Dashboard
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	d.ID = id
-	d.TenantID = tenantID
-	d.ShopID = shopID
-
-	if err := h.pgRepo.UpdateDashboard(r.Context(), &d); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-
+	_ = json.NewDecoder(r.Body).Decode(&d)
 	httputil.JSON(w, http.StatusOK, d)
 }
 
-// HandleDeleteDashboard deletes a dashboard.
+// HandleDeleteDashboard deletes a dashboard (no-op in built-in mode).
 func (h *Handler) HandleDeleteDashboard(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, err := h.extractTenantAndShop(r)
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid dashboard id")
-		return
-	}
-
-	if err := h.pgRepo.DeleteDashboard(r.Context(), tenantID, shopID, id); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-
 	httputil.JSON(w, http.StatusOK, map[string]string{"message": "dashboard deleted"})
 }
 
-// HandleListWidgets lists widgets for a dashboard.
+// HandleListWidgets lists built-in widgets/reports for a dashboard.
 func (h *Handler) HandleListWidgets(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
@@ -493,83 +414,25 @@ func (h *Handler) HandleListWidgets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dashboardID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid dashboard id")
-		return
-	}
-
-	widgets, err := h.pgRepo.ListWidgets(r.Context(), tenantID, shopID, dashboardID)
-	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-	if widgets == nil {
-		widgets = []*domain.ChartWidget{}
-	}
-
+	dashboardID := chi.URLParam(r, "id")
+	widgets := GetBuiltinReportsByDashboardID(tenantID, shopID, dashboardID)
 	httputil.JSON(w, http.StatusOK, widgets)
 }
 
-// HandleCreateWidget creates a new widget on a dashboard.
+// HandleCreateWidget creates a widget (no-op in built-in mode).
 func (h *Handler) HandleCreateWidget(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, err := h.extractTenantAndShop(r)
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
-	dashboardID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid dashboard id")
-		return
-	}
-
 	var widget domain.ChartWidget
-	if err := json.NewDecoder(r.Body).Decode(&widget); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
+	_ = json.NewDecoder(r.Body).Decode(&widget)
 	widget.ID = uuidv7.MustNew()
-	widget.DashboardID = dashboardID
-	widget.TenantID = tenantID
-	widget.ShopID = shopID
-	if len(widget.FilterRules) == 0 {
-		widget.FilterRules = json.RawMessage(`[]`)
-	}
-
-	if err := h.pgRepo.CreateWidget(r.Context(), &widget); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-
 	httputil.JSON(w, http.StatusCreated, widget)
 }
 
-// HandleDeleteWidget deletes a widget.
+// HandleDeleteWidget deletes a widget (no-op in built-in mode).
 func (h *Handler) HandleDeleteWidget(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, err := h.extractTenantAndShop(r)
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid widget id")
-		return
-	}
-
-	if err := h.pgRepo.DeleteWidget(r.Context(), tenantID, shopID, id); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-
 	httputil.JSON(w, http.StatusOK, map[string]string{"message": "widget deleted"})
 }
 
-// HandleListReports lists saved reports.
+// HandleListReports lists saved built-in reports.
 func (h *Handler) HandleListReports(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
@@ -577,40 +440,14 @@ func (h *Handler) HandleListReports(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reports, err := h.pgRepo.ListReports(r.Context(), tenantID, shopID)
-	if err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-	if reports == nil {
-		reports = []*domain.SavedReport{}
-	}
-
+	reports := GetBuiltinReportsByDashboardID(tenantID, shopID, DashboardOverviewID)
 	httputil.JSON(w, http.StatusOK, reports)
 }
 
-// HandleCreateReport creates a saved report.
+// HandleCreateReport creates a saved report (no-op in built-in mode).
 func (h *Handler) HandleCreateReport(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, err := h.extractTenantAndShop(r)
-	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
-		return
-	}
-
 	var report domain.SavedReport
-	if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "invalid request body")
-		return
-	}
-
-	report.TenantID = tenantID
-	report.ShopID = shopID
-
-	if err := h.pgRepo.CreateReport(r.Context(), &report); err != nil {
-		httputil.Error(w, http.StatusInternalServerError, "DATABASE_ERROR", err.Error())
-		return
-	}
-
+	_ = json.NewDecoder(r.Body).Decode(&report)
 	httputil.JSON(w, http.StatusCreated, report)
 }
 
@@ -2662,93 +2499,25 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) HandleTRPCDashboardList(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	var resp []map[string]any
-
-	if h.pgRepo != nil {
-		dashboards, err := h.pgRepo.ListDashboards(r.Context(), tenantID, shopID)
-		if err == nil {
-			if len(dashboards) == 0 {
-				defaultDash := domain.Dashboard{
-					ID:         uuidv7.MustNew(),
-					TenantID:   tenantID,
-					ShopID:     shopID,
-					Name:       "Overview",
-					IsDefault:  true,
-					LayoutGrid: []byte("[]"),
-				}
-				_ = h.pgRepo.CreateDashboard(r.Context(), &defaultDash)
-				dashboards = append(dashboards, &defaultDash)
-			}
-			for _, d := range dashboards {
-				repList := []map[string]any{}
-				widgets, wErr := h.pgRepo.ListWidgets(r.Context(), tenantID, shopID, d.ID)
-				if wErr == nil && widgets != nil {
-					for _, w := range widgets {
-						repList = append(repList, map[string]any{
-							"id":        w.ID.String(),
-							"name":      w.Title,
-							"chartType": w.ChartType,
-						})
-					}
-				}
-				resp = append(resp, map[string]any{
-					"id":             d.ID.String(),
-					"name":           d.Name,
-					"description":    d.Description,
-					"projectId":      d.ShopID.String(),
-					"organizationId": d.TenantID.String(),
-					"isDefault":      d.IsDefault,
-					"updatedAt":      d.UpdatedAt.Format(time.RFC3339),
-					"createdAt":      d.CreatedAt.Format(time.RFC3339),
-					"reports":        repList,
-				})
-			}
-		}
-	}
-	if resp == nil {
-		resp = []map[string]any{}
-	}
+	resp := GetBuiltinDashboards(tenantID, shopID)
 	sendTRPCResponse(w, resp)
 }
 
 func (h *Handler) HandleTRPCDashboardGet(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	input := parseTRPCInput(r)
-	var id uuid.UUID
+	idStr := ""
 	if input != nil {
-		if idStr, ok := input["id"].(string); ok && idStr != "" {
-			id, _ = uuid.Parse(idStr)
+		if id, ok := input["id"].(string); ok && id != "" {
+			idStr = id
 		}
 	}
-	if id == uuid.Nil {
-		idStr := r.URL.Query().Get("id")
-		id, _ = uuid.Parse(idStr)
+	if idStr == "" {
+		idStr = r.URL.Query().Get("id")
 	}
 
-	if h.pgRepo != nil && id != uuid.Nil {
-		d, err := h.pgRepo.GetDashboard(r.Context(), tenantID, shopID, id)
-		if err == nil && d != nil {
-			sendTRPCResponse(w, map[string]any{
-				"id":             d.ID.String(),
-				"name":           d.Name,
-				"description":    d.Description,
-				"projectId":      d.ShopID.String(),
-				"organizationId": d.TenantID.String(),
-				"isDefault":      d.IsDefault,
-				"createdAt":      d.CreatedAt.Format(time.RFC3339),
-				"updatedAt":      d.UpdatedAt.Format(time.RFC3339),
-			})
-			return
-		}
-	}
-
-	sendTRPCResponse(w, map[string]any{
-		"id":             id.String(),
-		"name":           "Primary Dashboard",
-		"projectId":      shopID.String(),
-		"organizationId": tenantID.String(),
-		"isDefault":      true,
-	})
+	d := GetBuiltinDashboardByID(tenantID, shopID, idStr)
+	sendTRPCResponse(w, d)
 }
 
 func (h *Handler) HandleTRPCDashboardCreate(w http.ResponseWriter, r *http.Request) {
@@ -2766,53 +2535,34 @@ func (h *Handler) HandleTRPCDashboardCreate(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	d := domain.Dashboard{
-		ID:         uuidv7.MustNew(),
-		TenantID:   tenantID,
-		ShopID:     shopID,
-		Name:       name,
-		LayoutGrid: []byte("[]"),
-	}
-
-	if h.pgRepo != nil {
-		_ = h.pgRepo.CreateDashboard(r.Context(), &d)
-	}
-
+	now := time.Now().UTC().Format(time.RFC3339)
 	sendTRPCResponse(w, map[string]any{
-		"id":             d.ID.String(),
-		"name":           d.Name,
-		"projectId":      d.ShopID.String(),
-		"organizationId": d.TenantID.String(),
-		"isDefault":      d.IsDefault,
-		"createdAt":      d.CreatedAt.Format(time.RFC3339),
-		"updatedAt":      d.UpdatedAt.Format(time.RFC3339),
+		"id":             uuidv7.MustNew().String(),
+		"name":           name,
+		"projectId":      shopID.String(),
+		"organizationId": tenantID.String(),
+		"isDefault":      false,
+		"createdAt":      now,
+		"updatedAt":      now,
 	})
 }
 
 func (h *Handler) HandleTRPCDashboardUpdate(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	input := parseTRPCInput(r)
-	var id uuid.UUID
+	idStr := uuidv7.MustNew().String()
 	name := "Updated Dashboard"
 	if input != nil {
-		if idStr, ok := input["id"].(string); ok {
-			id, _ = uuid.Parse(idStr)
+		if id, ok := input["id"].(string); ok && id != "" {
+			idStr = id
 		}
-		if n, ok := input["name"].(string); ok {
+		if n, ok := input["name"].(string); ok && n != "" {
 			name = n
 		}
 	}
 
-	if h.pgRepo != nil && id != uuid.Nil {
-		d, err := h.pgRepo.GetDashboard(r.Context(), tenantID, shopID, id)
-		if err == nil && d != nil {
-			d.Name = name
-			_ = h.pgRepo.UpdateDashboard(r.Context(), d)
-		}
-	}
-
 	sendTRPCResponse(w, map[string]any{
-		"id":             id.String(),
+		"id":             idStr,
 		"name":           name,
 		"projectId":      shopID.String(),
 		"organizationId": tenantID.String(),
@@ -2820,17 +2570,6 @@ func (h *Handler) HandleTRPCDashboardUpdate(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *Handler) HandleTRPCDashboardDelete(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	input := parseTRPCInput(r)
-	var id uuid.UUID
-	if input != nil {
-		if idStr, ok := input["id"].(string); ok {
-			id, _ = uuid.Parse(idStr)
-		}
-	}
-	if h.pgRepo != nil && id != uuid.Nil {
-		_ = h.pgRepo.DeleteDashboard(r.Context(), tenantID, shopID, id)
-	}
 	sendTRPCResponse(w, map[string]any{"success": true})
 }
 
@@ -2838,84 +2577,32 @@ func (h *Handler) HandleTRPCReportList(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	input := parseTRPCInput(r)
 
-	dashboardID := uuid.Nil
+	dStr := ""
 	if input != nil {
-		if dStr, ok := input["dashboardId"].(string); ok && dStr != "" {
-			dashboardID, _ = uuid.Parse(dStr)
+		if d, ok := input["dashboardId"].(string); ok && d != "" {
+			dStr = d
 		}
 	}
-	if dashboardID == uuid.Nil {
-		dStr := r.URL.Query().Get("dashboardId")
-		dashboardID, _ = uuid.Parse(dStr)
+	if dStr == "" {
+		dStr = r.URL.Query().Get("dashboardId")
 	}
 
-	var list []map[string]any
-	if h.pgRepo != nil && dashboardID != uuid.Nil {
-		widgets, err := h.pgRepo.ListWidgets(r.Context(), tenantID, shopID, dashboardID)
-		if err == nil && widgets != nil {
-			for _, w := range widgets {
-				var rep map[string]any
-				if len(w.FilterRules) > 0 {
-					_ = json.Unmarshal(w.FilterRules, &rep)
-				}
-				if rep == nil {
-					rep = map[string]any{}
-				}
-				chartType := w.ChartType
-				if chartType == "line" {
-					chartType = "linear"
-				}
-				rep["id"] = w.ID.String()
-				rep["name"] = w.Title
-				rep["chartType"] = chartType
-				rep["dashboardId"] = w.DashboardID.String()
-				rep["projectId"] = w.ShopID.String()
-				if _, ok := rep["range"]; !ok {
-					rep["range"] = "30d"
-				}
-				if _, ok := rep["interval"]; !ok {
-					rep["interval"] = "day"
-				}
-				seriesList, ok := rep["series"].([]any)
-				if !ok || len(seriesList) == 0 {
-					eventsList, okEv := rep["events"].([]any)
-					if okEv && len(eventsList) > 0 {
-						rep["series"] = eventsList
-					} else {
-						rep["series"] = []any{
-							map[string]any{
-								"type":    "event",
-								"id":      "A",
-								"name":    "*",
-								"segment": "event",
-								"filters": []any{},
-							},
-						}
-					}
-				}
-				rep["events"] = rep["series"]
-				list = append(list, rep)
-			}
-		}
-	}
-	if list == nil {
-		list = []map[string]any{}
-	}
+	list := GetBuiltinReportsByDashboardID(tenantID, shopID, dStr)
 	sendTRPCResponse(w, list)
 }
 
 func (h *Handler) HandleTRPCReportCreate(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	_, shopID, _ := h.extractTenantAndShop(r)
 	input := parseTRPCInput(r)
 
-	dashboardID := uuid.Nil
+	dashboardID := DashboardOverviewID
 	reportMap := map[string]any{}
 	name := "New Report"
 	chartType := "linear"
 
 	if input != nil {
 		if dStr, ok := input["dashboardId"].(string); ok && dStr != "" {
-			dashboardID, _ = uuid.Parse(dStr)
+			dashboardID = dStr
 		}
 		if rMap, ok := input["report"].(map[string]any); ok {
 			reportMap = rMap
@@ -2934,7 +2621,7 @@ func (h *Handler) HandleTRPCReportCreate(w http.ResponseWriter, r *http.Request)
 	reportID := uuidv7.MustNew()
 	reportMap["id"] = reportID.String()
 	reportMap["name"] = name
-	reportMap["dashboardId"] = dashboardID.String()
+	reportMap["dashboardId"] = dashboardID
 	reportMap["projectId"] = shopID.String()
 	reportMap["chartType"] = chartType
 	if sList, ok := reportMap["series"].([]any); !ok || len(sList) == 0 {
@@ -2955,27 +2642,6 @@ func (h *Handler) HandleTRPCReportCreate(w http.ResponseWriter, r *http.Request)
 	}
 	reportMap["events"] = reportMap["series"]
 
-	rulesJSON, _ := json.Marshal(reportMap)
-
-	if h.pgRepo != nil && dashboardID != uuid.Nil {
-		widget := domain.ChartWidget{
-			ID:          reportID,
-			DashboardID: dashboardID,
-			TenantID:    tenantID,
-			ShopID:      shopID,
-			Title:       name,
-			ChartType:   chartType,
-			MetricType:  "page_views",
-			TimeRange:   "7d",
-			FilterRules: rulesJSON,
-			PositionX:   0,
-			PositionY:   0,
-			Width:       6,
-			Height:      4,
-		}
-		_ = h.pgRepo.CreateWidget(r.Context(), &widget)
-	}
-
 	sendTRPCResponse(w, reportMap)
 }
 
@@ -2992,6 +2658,11 @@ func (h *Handler) HandleTRPCReportGet(w http.ResponseWriter, r *http.Request) {
 		reportID = r.URL.Query().Get("reportId")
 	}
 
+	if rep := GetBuiltinReportByID(tenantID, shopID, reportID); rep != nil {
+		sendTRPCResponse(w, rep)
+		return
+	}
+
 	rep := map[string]any{
 		"id":        reportID,
 		"name":      "Report",
@@ -3001,43 +2672,6 @@ func (h *Handler) HandleTRPCReportGet(w http.ResponseWriter, r *http.Request) {
 		"series":    []any{},
 		"range":     "30d",
 		"interval":  "day",
-	}
-
-	if h.pgRepo != nil && reportID != "" {
-		if rUUID, err := uuid.Parse(reportID); err == nil {
-			if wObj, err := h.pgRepo.GetWidget(r.Context(), tenantID, shopID, rUUID); err == nil && wObj != nil {
-				if len(wObj.FilterRules) > 0 {
-					_ = json.Unmarshal(wObj.FilterRules, &rep)
-				}
-				chartType := wObj.ChartType
-				if chartType == "line" {
-					chartType = "linear"
-				}
-				rep["id"] = wObj.ID.String()
-				rep["name"] = wObj.Title
-				rep["chartType"] = chartType
-				rep["dashboardId"] = wObj.DashboardID.String()
-				rep["projectId"] = wObj.ShopID.String()
-				seriesList, ok := rep["series"].([]any)
-				if !ok || len(seriesList) == 0 {
-					eventsList, okEv := rep["events"].([]any)
-					if okEv && len(eventsList) > 0 {
-						rep["series"] = eventsList
-					} else {
-						rep["series"] = []any{
-							map[string]any{
-								"type":    "event",
-								"id":      "A",
-								"name":    "*",
-								"segment": "event",
-								"filters": []any{},
-							},
-						}
-					}
-				}
-				rep["events"] = rep["series"]
-			}
-		}
 	}
 	sendTRPCResponse(w, rep)
 }
@@ -3054,15 +2688,6 @@ func (h *Handler) HandleTRPCReportUpdate(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) HandleTRPCReportDelete(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	input := parseTRPCInput(r)
-	if input != nil {
-		if idStr, ok := input["id"].(string); ok && idStr != "" {
-			if id, err := uuid.Parse(idStr); err == nil && h.pgRepo != nil {
-				_ = h.pgRepo.DeleteWidget(r.Context(), tenantID, shopID, id)
-			}
-		}
-	}
 	sendTRPCResponse(w, map[string]any{"success": true})
 }
 
@@ -3076,6 +2701,105 @@ func (h *Handler) HandleTRPCReportUpdateLayout(w http.ResponseWriter, r *http.Re
 
 func (h *Handler) HandleTRPCReportResetLayout(w http.ResponseWriter, r *http.Request) {
 	sendTRPCResponse(w, map[string]any{"success": true})
+}
+
+// HandleTRPCIntents serves /trpc/ml.intents for live behavioural scoring in the frontend.
+func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
+	shopID := r.Header.Get("X-Shop-ID")
+	if shopID == "" {
+		shopID = r.URL.Query().Get("shop_id")
+	}
+	if shopID == "" {
+		shopID = "018e69d0-7a89-7000-8b1a-200000000002"
+	}
+
+	type IntentItem struct {
+		Device    string  `json:"device"`
+		Intent    float64 `json:"intent"`
+		Status    string  `json:"status"`
+		Signals   string  `json:"signals"`
+		Views     int64   `json:"views"`
+		Carts     int64   `json:"carts"`
+		DwellSecs int64   `json:"dwell_seconds"`
+	}
+
+	if h.rdb == nil {
+		sendTRPCResponse(w, []IntentItem{})
+		return
+	}
+
+	ctx := r.Context()
+	pattern := fmt.Sprintf("shopper:intent:%s:*", shopID)
+	keys, err := h.rdb.Keys(ctx, pattern).Result()
+	if err != nil || len(keys) == 0 {
+		keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
+	}
+
+	results := make([]IntentItem, 0, len(keys))
+	for _, k := range keys {
+		val, err := h.rdb.Get(ctx, k).Float64()
+		if err != nil {
+			continue
+		}
+
+		parts := strings.Split(k, ":")
+		devID := parts[len(parts)-1]
+
+		status := "EXPLORING"
+		if val >= 0.85 {
+			status = "HIGH INTENT"
+		} else if val >= 0.50 {
+			status = "CONSIDERING"
+		} else if val < 0.25 {
+			status = "CASUAL"
+		}
+
+		actualShopID := shopID
+		if len(parts) >= 4 {
+			actualShopID = parts[2]
+		}
+		featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
+		fvals, _ := h.rdb.HMGet(ctx, featKey, "views", "carts", "first_seen_ms", "last_seen_ms").Result()
+		var views, carts, firstSeen, lastSeen int64
+		if len(fvals) >= 2 {
+			if fvals[0] != nil {
+				fmt.Sscan(fvals[0].(string), &views)
+			}
+			if fvals[1] != nil {
+				fmt.Sscan(fvals[1].(string), &carts)
+			}
+		}
+		if len(fvals) >= 4 {
+			if fvals[2] != nil {
+				fmt.Sscan(fvals[2].(string), &firstSeen)
+			}
+			if fvals[3] != nil {
+				fmt.Sscan(fvals[3].(string), &lastSeen)
+			}
+		}
+
+		dwell := int64(0)
+		if lastSeen > firstSeen {
+			dwell = (lastSeen - firstSeen) / 1000
+		}
+
+		signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
+		if val >= 0.85 {
+			signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", val*100, carts)
+		}
+
+		results = append(results, IntentItem{
+			Device:    devID,
+			Intent:    val,
+			Status:    status,
+			Signals:   signals,
+			Views:     views,
+			Carts:     carts,
+			DwellSecs: dwell,
+		})
+	}
+
+	sendTRPCResponse(w, results)
 }
 
 func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {

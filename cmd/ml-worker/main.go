@@ -66,7 +66,7 @@ func main() {
 	// 4. ML Stream Processor Handler
 	eventHandler := func(ctx context.Context, event *domain.Event) error {
 		// CRITICAL(sub-millisecond-inference): Evaluate intent without blocking stream ingestion
-		score, isHighIntent, err := scorer.ProcessEvent(ctx, event)
+		score, isHighIntent, _, err := scorer.ProcessEvent(ctx, event)
 		if err != nil {
 			log.Printf("[ML Worker] Warning: scoring error for device %s: %v", event.DeviceID, err)
 			return nil

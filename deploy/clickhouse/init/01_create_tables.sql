@@ -105,8 +105,30 @@ PARTITION BY toYYYYMM(created_at)
 ORDER BY (tenant_id, shop_id, module_key, window_kind, dimension_key)
 SETTINGS index_granularity = 8192;
 
+-- OpenAnalytics Behavioral ML Feature Store
+CREATE TABLE IF NOT EXISTS openpanel.shopper_features (
+    tenant_id UUID,
+    shop_id UUID,
+    device_id String CODEC(ZSTD(3)),
+    session_id UUID,
+    
+    views_count UInt32,
+    cart_adds_count UInt32,
+    distinct_products UInt32,
+    total_dwell_seconds UInt32,
+    has_purchase UInt8,
+    cart_intent_score Float32 DEFAULT 0.0,
+    
+    last_event_at DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(3))
+)
+ENGINE = ReplacingMergeTree(last_event_at)
+PARTITION BY toYYYYMM(last_event_at)
+ORDER BY (tenant_id, shop_id, device_id, session_id)
+SETTINGS index_granularity = 8192;
+
 -- Default Database Views (ensures DBeaver, IDEs, and tools querying 'default' DB see all data)
 CREATE VIEW IF NOT EXISTS default.events AS SELECT * FROM openpanel.events;
 CREATE VIEW IF NOT EXISTS default.sessions AS SELECT * FROM openpanel.sessions;
 CREATE VIEW IF NOT EXISTS default.hourly_metrics AS SELECT * FROM openpanel.hourly_metrics;
 CREATE VIEW IF NOT EXISTS default.project_insights AS SELECT * FROM openpanel.project_insights;
+CREATE VIEW IF NOT EXISTS default.shopper_features AS SELECT * FROM openpanel.shopper_features;

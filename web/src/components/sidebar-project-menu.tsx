@@ -62,6 +62,11 @@ export default function SidebarProjectMenu({
         icon={TrendingUpDownIcon}
         label="Insights"
       />
+      <SidebarLink
+        href={'/ml-intent'}
+        icon={SparklesIcon}
+        label="Behavioral ML"
+      />
       <SidebarLink href={'/pages'} icon={LayersIcon} label="Pages" />
       <SidebarLink href={'/realtime'} icon={Globe2Icon} label="Realtime" />
       <SidebarLink href={'/events'} icon={GanttChartIcon} label="Events" />

@@ -153,3 +153,18 @@ type OverviewLiveDataResult struct {
 	Referrers     []ReferrerMinuteItem `json:"referrers"`
 }
 
+// ShopperFeature represents rolling behavioral features and ML intent score.
+type ShopperFeature struct {
+	TenantID          uuid.UUID `json:"tenant_id"`
+	ShopID            uuid.UUID `json:"shop_id"`
+	DeviceID          string    `json:"device_id"`
+	SessionID         uuid.UUID `json:"session_id"`
+	ViewsCount        uint32    `json:"views_count"`
+	CartAddsCount     uint32    `json:"cart_adds_count"`
+	DistinctProducts  uint32    `json:"distinct_products"`
+	TotalDwellSeconds uint32    `json:"total_dwell_seconds"`
+	HasPurchase       uint8     `json:"has_purchase"`
+	CartIntentScore   float32   `json:"cart_intent_score"`
+	LastEventAt       time.Time `json:"last_event_at"`
+}
+

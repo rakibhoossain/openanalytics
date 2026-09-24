@@ -33,6 +33,7 @@ type BatchWriter struct {
 	mu             sync.Mutex
 	eventsBuffer   []*domain.Event
 	sessionsBuffer []*domain.Session
+	featuresBuffer []*domain.ShopperFeature
 
 	flushTimer *time.Timer
 	isClosed   bool
@@ -82,6 +83,7 @@ func NewBatchWriter(ctx context.Context, cfg Config) (*BatchWriter, error) {
 		flushInterval:  cfg.FlushInterval,
 		eventsBuffer:   make([]*domain.Event, 0, cfg.BatchSize),
 		sessionsBuffer: make([]*domain.Session, 0, 500),
+		featuresBuffer: make([]*domain.ShopperFeature, 0, 500),
 	}
 
 	return w, nil
@@ -133,7 +135,17 @@ func (w *BatchWriter) AddSession(session *domain.Session) {
 	w.mu.Unlock()
 }
 
-// Flush writes all buffered events and sessions to ClickHouse in a single native TCP transaction.
+// AddShopperFeature buffers an ML feature snapshot for persistence in ClickHouse.
+func (w *BatchWriter) AddShopperFeature(feat *domain.ShopperFeature) {
+	if feat == nil {
+		return
+	}
+	w.mu.Lock()
+	w.featuresBuffer = append(w.featuresBuffer, feat)
+	w.mu.Unlock()
+}
+
+// Flush writes all buffered events, sessions, and ML shopper features to ClickHouse.
 func (w *BatchWriter) Flush(ctx context.Context) error {
 	w.mu.Lock()
 	if w.flushTimer != nil {
@@ -141,15 +153,17 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 		w.flushTimer = nil
 	}
 
-	if len(w.eventsBuffer) == 0 && len(w.sessionsBuffer) == 0 {
+	if len(w.eventsBuffer) == 0 && len(w.sessionsBuffer) == 0 && len(w.featuresBuffer) == 0 {
 		w.mu.Unlock()
 		return nil
 	}
 
 	events := w.eventsBuffer
 	sessions := w.sessionsBuffer
+	features := w.featuresBuffer
 	w.eventsBuffer = make([]*domain.Event, 0, w.batchSize)
 	w.sessionsBuffer = make([]*domain.Session, 0, 500)
+	w.featuresBuffer = make([]*domain.ShopperFeature, 0, 500)
 	w.mu.Unlock()
 
 	// 1. Flush Events
@@ -168,6 +182,15 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 			return err
 		}
 		log.Printf("[ClickHouse] Flushed %d sessions successfully", len(sessions))
+	}
+
+	// 3. Flush Behavioral ML Features
+	if len(features) > 0 {
+		if err := w.flushShopperFeaturesWithRetry(ctx, features); err != nil {
+			log.Printf("[ClickHouse] ERROR flushing %d shopper features: %v", len(features), err)
+		} else {
+			log.Printf("[ClickHouse] Flushed %d shopper features successfully", len(features))
+		}
 	}
 
 	return nil
@@ -287,6 +310,40 @@ func (w *BatchWriter) flushSessionsWithRetry(ctx context.Context, sessions []*do
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append session to batch: %w", err)
+		}
+	}
+
+	return batch.Send()
+}
+
+func (w *BatchWriter) flushShopperFeaturesWithRetry(ctx context.Context, features []*domain.ShopperFeature) error {
+	query := fmt.Sprintf(`INSERT INTO %s.shopper_features (
+		tenant_id, shop_id, device_id, session_id,
+		views_count, cart_adds_count, distinct_products, total_dwell_seconds,
+		has_purchase, cart_intent_score, last_event_at
+	)`, w.database)
+
+	batch, err := w.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to prepare shopper features batch: %w", err)
+	}
+
+	for _, f := range features {
+		err := batch.Append(
+			f.TenantID,
+			f.ShopID,
+			f.DeviceID,
+			f.SessionID,
+			f.ViewsCount,
+			f.CartAddsCount,
+			f.DistinctProducts,
+			f.TotalDwellSeconds,
+			f.HasPurchase,
+			f.CartIntentScore,
+			f.LastEventAt.UTC(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to append shopper feature to batch: %w", err)
 		}
 	}
 

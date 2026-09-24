@@ -85,11 +85,21 @@ func NewScorer(modelPath string, rdb *redis.Client) (*Scorer, error) {
 	}, nil
 }
 
-// ProcessEvent updates the shopper's real-time feature window in Redis and calculates purchase intent.
-func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64, bool, error) {
+// ProcessEvent updates the shopper's real-time feature window in Redis, calculates purchase intent,
+// and returns the full feature snapshot ready for ClickHouse feature store ingestion.
+func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64, bool, *domain.ShopperFeature, error) {
 	if s.rdb == nil {
 		// Fallback fast scoring without Redis state
-		return 0.1, false, nil
+		feat := &domain.ShopperFeature{
+			TenantID:        event.TenantID,
+			ShopID:          event.ShopID,
+			DeviceID:        event.DeviceID,
+			SessionID:       event.SessionID,
+			ViewsCount:      1,
+			CartIntentScore: 0.1,
+			LastEventAt:     event.CreatedAt,
+		}
+		return 0.1, false, feat, nil
 	}
 
 	featureKey := fmt.Sprintf("shopper:feat:%s:%s", event.ShopID.String(), event.DeviceID)
@@ -116,13 +126,13 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		return 0.0, false, fmt.Errorf("failed to update shopper features in redis: %w", err)
+		return 0.0, false, nil, fmt.Errorf("failed to update shopper features in redis: %w", err)
 	}
 
 	// 2. Fetch current aggregated features
 	vals, err := s.rdb.HMGet(ctx, featureKey, "views", "carts", "first_seen_ms", "last_seen_ms").Result()
 	if err != nil {
-		return 0.0, false, err
+		return 0.0, false, nil, err
 	}
 
 	var views, carts, firstSeen, lastSeen int64
@@ -175,5 +185,24 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 		_ = s.rdb.Set(ctx, triggerKey, "1", 15*time.Minute).Err()
 	}
 
-	return score, isHighIntent, nil
+	hasPurchase := uint8(0)
+	if event.Name == "purchase" {
+		hasPurchase = 1
+	}
+
+	feat := &domain.ShopperFeature{
+		TenantID:          event.TenantID,
+		ShopID:            event.ShopID,
+		DeviceID:          event.DeviceID,
+		SessionID:         event.SessionID,
+		ViewsCount:        uint32(views),
+		CartAddsCount:     uint32(carts),
+		DistinctProducts:  uint32(distinctProducts),
+		TotalDwellSeconds: uint32(dwellSeconds),
+		HasPurchase:       hasPurchase,
+		CartIntentScore:   float32(score),
+		LastEventAt:       event.CreatedAt,
+	}
+
+	return score, isHighIntent, feat, nil
 }

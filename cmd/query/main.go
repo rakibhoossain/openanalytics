@@ -15,7 +15,6 @@ import (
 	"github.com/go-chi/cors"
 
 	"openanalytics/internal/config"
-	"openanalytics/internal/postgres"
 	"openanalytics/internal/query"
 )
 
@@ -30,15 +29,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Connect to PostgreSQL for dashboard and metadata CRUD
-	pgRepo, err := postgres.NewRepository(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Fatalf("[PostgreSQL] Fatal: failed to connect to %s: %v", cfg.DatabaseURL, err)
-	}
-	defer pgRepo.Close()
-	log.Printf("[PostgreSQL] Connected to metadata database")
-
-	// 2. Connect to ClickHouse for analytical queries
+	// 1. Connect to ClickHouse for analytical queries
 	qs, err := query.NewService(ctx, query.Config{
 		Addr:     cfg.ClickHouseAddr,
 		Database: cfg.ClickHouseDatabase,
@@ -76,7 +67,7 @@ func main() {
 	}))
 
 	// 4. Register HTTP Handlers
-	handler := query.NewHandler(qs, pgRepo)
+	handler := query.NewHandler(qs)
 	handler.RegisterRoutes(r)
 
 	// Redirect root / directly to /ui/

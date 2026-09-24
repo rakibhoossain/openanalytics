@@ -91,6 +91,7 @@ export const PAGE_TITLES = {
   REALTIME: 'Realtime',
   REFERENCES: 'References',
   INSIGHTS: 'Insights',
+  BEHAVIORAL_ML: 'Behavioral ML',
   // Profiles
   PROFILES: 'Profiles',
   PROFILE_EVENTS: 'Profile events',

@@ -46,7 +46,7 @@ func TestScorer_SigmoidInference(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 	}
 
-	score, isHighIntent, err := scorer.ProcessEvent(context.Background(), event)
+	score, isHighIntent, feat, err := scorer.ProcessEvent(context.Background(), event)
 	if err != nil {
 		t.Fatalf("unexpected error on process event: %v", err)
 	}
@@ -55,5 +55,11 @@ func TestScorer_SigmoidInference(t *testing.T) {
 	}
 	if isHighIntent {
 		t.Errorf("expected false for initial single page view")
+	}
+	if feat == nil {
+		t.Fatalf("expected non-nil ShopperFeature snapshot")
+	}
+	if feat.DeviceID != event.DeviceID {
+		t.Errorf("expected device ID %s, got %s", event.DeviceID, feat.DeviceID)
 	}
 }

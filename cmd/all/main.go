@@ -23,7 +23,6 @@ import (
 	"openanalytics/internal/ingest"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/ml"
-	"openanalytics/internal/postgres"
 	"openanalytics/internal/query"
 	"openanalytics/internal/session"
 	"openanalytics/pkg/httputil"
@@ -164,13 +163,6 @@ func main() {
 	// ------------------------------------------------------------------
 	// 4. Start Query Engine & WebSocket Realtime Hub (:8081)
 	// ------------------------------------------------------------------
-	pgRepo, err := postgres.NewRepository(ctx, cfg.DatabaseURL)
-	if err != nil {
-		log.Printf("[Query Engine] Warning: PostgreSQL init error: %v", err)
-	} else {
-		defer pgRepo.Close()
-	}
-
 	qs, err := query.NewService(ctx, query.Config{
 		Addr:     cfg.ClickHouseAddr,
 		Database: cfg.ClickHouseDatabase,
@@ -186,7 +178,7 @@ func main() {
 	wsHub := query.NewWebSocketHub(rdb, qs)
 	wsHub.Start(ctx)
 
-	queryHandler := query.NewHandler(qs, pgRepo).WithRedis(rdb).WithWSHub(wsHub)
+	queryHandler := query.NewHandler(qs).WithRedis(rdb).WithWSHub(wsHub)
 
 	// ------------------------------------------------------------------
 	// 5. Start Stream Worker (Kafka Partition Consumer)
@@ -238,10 +230,13 @@ func main() {
 		go func() {
 			log.Println("[ML Worker] Behavioral inference stream active")
 			_ = mlConsumer.ConsumeLoop(ctx, func(ctx context.Context, event *domain.Event) error {
-				score, isHighIntent, _ := mlScorer.ProcessEvent(ctx, event)
+				score, isHighIntent, feat, _ := mlScorer.ProcessEvent(ctx, event)
 				if isHighIntent {
 					log.Printf("[ML Intent Alert] High intent (%.1f%%) on device %s (Shop: %s, Event: %s)",
 						score*100, event.DeviceID, event.ShopID.String(), event.Name)
+				}
+				if feat != nil && chWriter != nil {
+					chWriter.AddShopperFeature(feat)
 				}
 				return nil
 			})

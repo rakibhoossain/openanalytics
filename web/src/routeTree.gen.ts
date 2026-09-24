@@ -23,6 +23,7 @@ import { Route as AppTenantIdShopIdRouteImport } from './routes/_app.$tenantId.$
 import { Route as AppTenantIdShopIdIndexRouteImport } from './routes/_app.$tenantId.$shopId.index'
 import { Route as AppTenantIdShopIdDashboardsRouteImport } from './routes/_app.$tenantId.$shopId.dashboards'
 import { Route as AppTenantIdShopIdInsightsRouteImport } from './routes/_app.$tenantId.$shopId.insights'
+import { Route as AppTenantIdShopIdMlIntentRouteImport } from './routes/_app.$tenantId.$shopId.ml-intent'
 import { Route as AppTenantIdShopIdPagesRouteImport } from './routes/_app.$tenantId.$shopId.pages'
 import { Route as AppTenantIdShopIdRealtimeRouteImport } from './routes/_app.$tenantId.$shopId.realtime'
 import { Route as AppTenantIdShopIdReportsRouteImport } from './routes/_app.$tenantId.$shopId.reports'
@@ -114,6 +115,12 @@ const AppTenantIdShopIdInsightsRoute =
   AppTenantIdShopIdInsightsRouteImport.update({
     id: '/insights',
     path: '/insights',
+    getParentRoute: () => AppTenantIdShopIdRoute,
+  } as any)
+const AppTenantIdShopIdMlIntentRoute =
+  AppTenantIdShopIdMlIntentRouteImport.update({
+    id: '/ml-intent',
+    path: '/ml-intent',
     getParentRoute: () => AppTenantIdShopIdRoute,
   } as any)
 const AppTenantIdShopIdPagesRoute = AppTenantIdShopIdPagesRouteImport.update({
@@ -255,6 +262,7 @@ export interface FileRoutesByFullPath {
   '/$tenantId/': typeof AppTenantIdIndexRoute
   '/$tenantId/$shopId/dashboards': typeof AppTenantIdShopIdDashboardsRoute
   '/$tenantId/$shopId/insights': typeof AppTenantIdShopIdInsightsRoute
+  '/$tenantId/$shopId/ml-intent': typeof AppTenantIdShopIdMlIntentRoute
   '/$tenantId/$shopId/pages': typeof AppTenantIdShopIdPagesRoute
   '/$tenantId/$shopId/realtime': typeof AppTenantIdShopIdRealtimeRoute
   '/$tenantId/$shopId/reports': typeof AppTenantIdShopIdReportsRoute
@@ -289,6 +297,7 @@ export interface FileRoutesByTo {
   '/$tenantId': typeof AppTenantIdIndexRoute
   '/$tenantId/$shopId/dashboards': typeof AppTenantIdShopIdDashboardsRoute
   '/$tenantId/$shopId/insights': typeof AppTenantIdShopIdInsightsRoute
+  '/$tenantId/$shopId/ml-intent': typeof AppTenantIdShopIdMlIntentRoute
   '/$tenantId/$shopId/pages': typeof AppTenantIdShopIdPagesRoute
   '/$tenantId/$shopId/realtime': typeof AppTenantIdShopIdRealtimeRoute
   '/$tenantId/$shopId/reports': typeof AppTenantIdShopIdReportsRoute
@@ -324,6 +333,7 @@ export interface FileRoutesById {
   '/_app/$tenantId/': typeof AppTenantIdIndexRoute
   '/_app/$tenantId/$shopId/dashboards': typeof AppTenantIdShopIdDashboardsRoute
   '/_app/$tenantId/$shopId/insights': typeof AppTenantIdShopIdInsightsRoute
+  '/_app/$tenantId/$shopId/ml-intent': typeof AppTenantIdShopIdMlIntentRoute
   '/_app/$tenantId/$shopId/pages': typeof AppTenantIdShopIdPagesRoute
   '/_app/$tenantId/$shopId/realtime': typeof AppTenantIdShopIdRealtimeRoute
   '/_app/$tenantId/$shopId/reports': typeof AppTenantIdShopIdReportsRoute
@@ -362,6 +372,7 @@ export interface FileRouteTypes {
     | '/$tenantId/'
     | '/$tenantId/$shopId/dashboards'
     | '/$tenantId/$shopId/insights'
+    | '/$tenantId/$shopId/ml-intent'
     | '/$tenantId/$shopId/pages'
     | '/$tenantId/$shopId/realtime'
     | '/$tenantId/$shopId/reports'
@@ -396,6 +407,7 @@ export interface FileRouteTypes {
     | '/$tenantId'
     | '/$tenantId/$shopId/dashboards'
     | '/$tenantId/$shopId/insights'
+    | '/$tenantId/$shopId/ml-intent'
     | '/$tenantId/$shopId/pages'
     | '/$tenantId/$shopId/realtime'
     | '/$tenantId/$shopId/reports'
@@ -430,6 +442,7 @@ export interface FileRouteTypes {
     | '/_app/$tenantId/'
     | '/_app/$tenantId/$shopId/dashboards'
     | '/_app/$tenantId/$shopId/insights'
+    | '/_app/$tenantId/$shopId/ml-intent'
     | '/_app/$tenantId/$shopId/pages'
     | '/_app/$tenantId/$shopId/realtime'
     | '/_app/$tenantId/$shopId/reports'
@@ -563,6 +576,13 @@ declare module '@tanstack/react-router' {
       path: '/insights'
       fullPath: '/$tenantId/$shopId/insights'
       preLoaderRoute: typeof AppTenantIdShopIdInsightsRouteImport
+      parentRoute: typeof AppTenantIdShopIdRoute
+    }
+    '/_app/$tenantId/$shopId/ml-intent': {
+      id: '/_app/$tenantId/$shopId/ml-intent'
+      path: '/ml-intent'
+      fullPath: '/$tenantId/$shopId/ml-intent'
+      preLoaderRoute: typeof AppTenantIdShopIdMlIntentRouteImport
       parentRoute: typeof AppTenantIdShopIdRoute
     }
     '/_app/$tenantId/$shopId/pages': {
@@ -787,6 +807,7 @@ const AppTenantIdShopIdProfilesProfileIdTabsRouteWithChildren =
 interface AppTenantIdShopIdRouteChildren {
   AppTenantIdShopIdDashboardsRoute: typeof AppTenantIdShopIdDashboardsRoute
   AppTenantIdShopIdInsightsRoute: typeof AppTenantIdShopIdInsightsRoute
+  AppTenantIdShopIdMlIntentRoute: typeof AppTenantIdShopIdMlIntentRoute
   AppTenantIdShopIdPagesRoute: typeof AppTenantIdShopIdPagesRoute
   AppTenantIdShopIdRealtimeRoute: typeof AppTenantIdShopIdRealtimeRoute
   AppTenantIdShopIdReportsRoute: typeof AppTenantIdShopIdReportsRoute
@@ -803,6 +824,7 @@ interface AppTenantIdShopIdRouteChildren {
 const AppTenantIdShopIdRouteChildren: AppTenantIdShopIdRouteChildren = {
   AppTenantIdShopIdDashboardsRoute: AppTenantIdShopIdDashboardsRoute,
   AppTenantIdShopIdInsightsRoute: AppTenantIdShopIdInsightsRoute,
+  AppTenantIdShopIdMlIntentRoute: AppTenantIdShopIdMlIntentRoute,
   AppTenantIdShopIdPagesRoute: AppTenantIdShopIdPagesRoute,
   AppTenantIdShopIdRealtimeRoute: AppTenantIdShopIdRealtimeRoute,
   AppTenantIdShopIdReportsRoute: AppTenantIdShopIdReportsRoute,
