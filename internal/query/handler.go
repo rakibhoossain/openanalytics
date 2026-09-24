@@ -1221,10 +1221,32 @@ func (h *Handler) HandleTRPCOverviewTopLinkOut(w http.ResponseWriter, r *http.Re
 }
 
 func (h *Handler) HandleTRPCOverviewUserJourney(w http.ResponseWriter, r *http.Request) {
-	sendTRPCResponse(w, map[string]any{
-		"nodes": []any{},
-		"links": []any{},
-	})
+	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	rangeStr := h.getParam(r, "range")
+	startStr := h.getParam(r, "startDate")
+	endStr := h.getParam(r, "endDate")
+
+	steps := 5
+	if sVal := h.getParam(r, "steps"); sVal != "" {
+		if parsed, err := strconv.Atoi(sVal); err == nil && parsed > 0 {
+			steps = parsed
+		}
+	} else if input := parseTRPCInput(r); input != nil {
+		if sVal, ok := input["steps"].(float64); ok && sVal > 0 {
+			steps = int(sVal)
+		}
+	}
+
+	result, err := h.queryService.GetUserJourney(r.Context(), tenantID, shopID, rangeStr, startStr, endStr, steps)
+	if err != nil || result == nil {
+		sendTRPCResponse(w, map[string]any{
+			"nodes": []any{},
+			"links": []any{},
+		})
+		return
+	}
+
+	sendTRPCResponse(w, result)
 }
 
 func (h *Handler) HandleTRPCReferenceGetChartReferences(w http.ResponseWriter, r *http.Request) {

@@ -168,3 +168,27 @@ type ShopperFeature struct {
 	LastEventAt       time.Time `json:"last_event_at"`
 }
 
+// SankeyNode represents a stage in the User Journey Sankey diagram.
+type SankeyNode struct {
+	ID         string  `json:"id"`
+	Label      string  `json:"label"`
+	NodeColor  string  `json:"nodeColor"`
+	Percentage float64 `json:"percentage"`
+	Value      int64   `json:"value"`
+	Step       int     `json:"step"`
+}
+
+// SankeyLink represents a directed transition between two journey steps.
+type SankeyLink struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Value  int64  `json:"value"`
+}
+
+// UserJourneyResult encapsulates the full Sankey graph payload.
+type UserJourneyResult struct {
+	Nodes []SankeyNode `json:"nodes"`
+	Links []SankeyLink `json:"links"`
+}
+
+

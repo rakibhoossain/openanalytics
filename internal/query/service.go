@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -1121,3 +1122,364 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 
 	return sessions, int64(total), nil
 }
+
+var journeyColors = []string{
+	"#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
+	"#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1",
+}
+
+// GetUserJourney constructs a multi-step user navigation graph for the Sankey diagram.
+func (s *Service) GetUserJourney(ctx context.Context, tenantID, shopID uuid.UUID, timeRange, startDateStr, endDateStr string, steps int) (*domain.UserJourneyResult, error) {
+	if steps < 2 {
+		steps = 2
+	}
+	if steps > 10 {
+		steps = 10
+	}
+
+	curStart, curEnd, _, _ := resolveTimeRange(timeRange, startDateStr, endDateStr)
+
+	// Step 1: Query top 3 entry pages
+	topEntriesQuery := fmt.Sprintf(`
+		WITH 
+		ordered_events AS (
+			SELECT 
+				toString(session_id) as session_id,
+				coalesce(nullIf(path, ''), '/') as path,
+				created_at
+			FROM %s.events
+			WHERE (tenant_id = ? OR tenant_id = toUUID('00000000-0000-0000-0000-000000000000')) 
+			  AND shop_id = ? 
+			  AND created_at BETWEEN ? AND ?
+			  AND (name = 'screen_view' OR name = 'page_view' OR path != '')
+			  AND path != ''
+			ORDER BY session_id ASC, created_at ASC
+		),
+		paths_deduped_cte AS (
+			SELECT 
+				session_id,
+				arraySlice(
+					arrayFilter(
+						(x, i) -> i = 1 OR x != paths_raw[i - 1],
+						groupArray(path) as paths_raw,
+						arrayEnumerate(paths_raw)
+					),
+					1, %d
+				) as paths_deduped
+			FROM ordered_events
+			GROUP BY session_id
+		),
+		session_paths AS (
+			SELECT 
+				session_id,
+				if(
+					arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(paths_deduped)) = 0,
+					paths_deduped,
+					arraySlice(
+						paths_deduped,
+						1,
+						arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(paths_deduped)) - 1
+					)
+				) as paths,
+				paths[1] as entry_page
+			FROM paths_deduped_cte
+			HAVING length(paths) >= 2
+		)
+		SELECT 
+			entry_page, 
+			count() as count
+		FROM session_paths
+		GROUP BY entry_page
+		ORDER BY count DESC
+		LIMIT 3
+	`, s.database, steps)
+
+	type entryRow struct {
+		EntryPage string `ch:"entry_page"`
+		Count     uint64 `ch:"count"`
+	}
+
+	var topEntries []entryRow
+	if err := s.conn.Select(ctx, &topEntries, topEntriesQuery, tenantID, shopID, curStart, curEnd); err != nil {
+		return &domain.UserJourneyResult{Nodes: []domain.SankeyNode{}, Links: []domain.SankeyLink{}}, err
+	}
+
+	if len(topEntries) == 0 {
+		return &domain.UserJourneyResult{Nodes: []domain.SankeyNode{}, Links: []domain.SankeyLink{}}, nil
+	}
+
+	var topEntryPages []string
+	var totalSessions int64
+	for _, e := range topEntries {
+		topEntryPages = append(topEntryPages, e.EntryPage)
+		totalSessions += int64(e.Count)
+	}
+
+	// Step 2: Query transitions between steps
+	transitionsQuery := fmt.Sprintf(`
+		WITH 
+		ordered_events AS (
+			SELECT 
+				toString(session_id) as session_id,
+				coalesce(nullIf(path, ''), '/') as path,
+				created_at
+			FROM %s.events
+			WHERE (tenant_id = ? OR tenant_id = toUUID('00000000-0000-0000-0000-000000000000')) 
+			  AND shop_id = ? 
+			  AND created_at BETWEEN ? AND ?
+			  AND (name = 'screen_view' OR name = 'page_view' OR path != '')
+			  AND path != ''
+			ORDER BY session_id ASC, created_at ASC
+		),
+		paths_deduped_cte AS (
+			SELECT 
+				session_id,
+				arraySlice(
+					arrayFilter(
+						(x, i) -> i = 1 OR x != paths_raw[i - 1],
+						groupArray(path) as paths_raw,
+						arrayEnumerate(paths_raw)
+					),
+					1, %d
+				) as paths_deduped
+			FROM ordered_events
+			GROUP BY session_id
+		),
+		session_paths AS (
+			SELECT 
+				session_id,
+				if(
+					arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(paths_deduped)) = 0,
+					paths_deduped,
+					arraySlice(
+						paths_deduped,
+						1,
+						arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(paths_deduped)) - 1
+					)
+				) as paths
+			FROM paths_deduped_cte
+			HAVING length(paths) >= 2 AND has(?, paths[1])
+		)
+		SELECT 
+			pair.1 as source,
+			pair.2 as target,
+			pair.3 as step,
+			count() as value
+		FROM (
+			SELECT arrayJoin(
+				arrayMap(i -> (paths[i], paths[i + 1], i), range(1, length(paths)))
+			) as pair 
+			FROM session_paths
+		)
+		GROUP BY source, target, step
+		ORDER BY step ASC, value DESC
+	`, s.database, steps)
+
+	type transitionRow struct {
+		Source string `ch:"source"`
+		Target string `ch:"target"`
+		Step   uint64 `ch:"step"`
+		Value  uint64 `ch:"value"`
+	}
+
+	var transitions []transitionRow
+	if err := s.conn.Select(ctx, &transitions, transitionsQuery, tenantID, shopID, curStart, curEnd, topEntryPages); err != nil {
+		return &domain.UserJourneyResult{Nodes: []domain.SankeyNode{}, Links: []domain.SankeyLink{}}, err
+	}
+
+	if len(transitions) == 0 {
+		return &domain.UserJourneyResult{Nodes: []domain.SankeyNode{}, Links: []domain.SankeyLink{}}, nil
+	}
+
+	// Step 3: Progressive Graph Construction
+	type nodeInfo struct {
+		path  string
+		value int64
+		step  int
+		color string
+	}
+
+	nodes := make(map[string]*nodeInfo)
+	var rawLinks []domain.SankeyLink
+
+	getNodeID := func(path string, step int) string {
+		return fmt.Sprintf("%s::step%d", path, step)
+	}
+
+	transitionsByStep := make(map[int][]transitionRow)
+	for _, t := range transitions {
+		sIdx := int(t.Step)
+		transitionsByStep[sIdx] = append(transitionsByStep[sIdx], t)
+	}
+
+	activeNodes := make(map[string]string)
+	for idx, entry := range topEntries {
+		nodeID := getNodeID(entry.EntryPage, 1)
+		color := journeyColors[idx%len(journeyColors)]
+		nodes[nodeID] = &nodeInfo{
+			path:  entry.EntryPage,
+			value: int64(entry.Count),
+			step:  1,
+			color: color,
+		}
+		activeNodes[entry.EntryPage] = nodeID
+	}
+
+	for step := 1; step < steps; step++ {
+		stepTransitions := transitionsByStep[step]
+		nextActiveNodes := make(map[string]string)
+
+		for sourcePath, sourceNodeID := range activeNodes {
+			var fromSource []transitionRow
+			for _, t := range stepTransitions {
+				if t.Source == sourcePath {
+					fromSource = append(fromSource, t)
+				}
+			}
+
+			// Sort by value DESC, take top 3 destinations per node
+			sort.Slice(fromSource, func(i, j int) bool {
+				return fromSource[i].Value > fromSource[j].Value
+			})
+			if len(fromSource) > 3 {
+				fromSource = fromSource[:3]
+			}
+
+			for _, t := range fromSource {
+				if t.Source == t.Target {
+					continue
+				}
+
+				targetNodeID := getNodeID(t.Target, step+1)
+				val := int64(t.Value)
+
+				rawLinks = append(rawLinks, domain.SankeyLink{
+					Source: sourceNodeID,
+					Target: targetNodeID,
+					Value:  val,
+				})
+
+				existing, ok := nodes[targetNodeID]
+				if ok {
+					existing.value += val
+				} else {
+					sourceData := nodes[sourceNodeID]
+					color := journeyColors[len(nodes)%len(journeyColors)]
+					if sourceData != nil && sourceData.color != "" {
+						color = sourceData.color
+					}
+					nodes[targetNodeID] = &nodeInfo{
+						path:  t.Target,
+						value: val,
+						step:  step + 1,
+						color: color,
+					}
+				}
+				nextActiveNodes[t.Target] = targetNodeID
+			}
+		}
+
+		activeNodes = nextActiveNodes
+		if len(activeNodes) == 0 {
+			break
+		}
+	}
+
+	// Step 4: Filter links by threshold (0.25% of total sessions)
+	minLinkValue := int64(math.Ceil(float64(totalSessions) * 0.0025))
+	if minLinkValue < 1 {
+		minLinkValue = 1
+	}
+
+	var filteredLinks []domain.SankeyLink
+	for _, l := range rawLinks {
+		if l.Value >= minLinkValue {
+			filteredLinks = append(filteredLinks, l)
+		}
+	}
+
+	// Step 5: Prune nodes and compute final node values
+	referencedNodeIDs := make(map[string]bool)
+	nodeValuesFromLinks := make(map[string]int64)
+
+	for _, l := range filteredLinks {
+		referencedNodeIDs[l.Source] = true
+		referencedNodeIDs[l.Target] = true
+		nodeValuesFromLinks[l.Target] += l.Value
+	}
+
+	// Remove entry nodes with no outgoing links
+	for id, n := range nodes {
+		if n.step == 1 {
+			hasOutgoing := false
+			for _, l := range filteredLinks {
+				if l.Source == id {
+					hasOutgoing = true
+					break
+				}
+			}
+			if !hasOutgoing {
+				delete(referencedNodeIDs, id)
+			}
+		}
+	}
+
+	var finalNodes []domain.SankeyNode
+	for id, data := range nodes {
+		if !referencedNodeIDs[id] {
+			continue
+		}
+		val := data.value
+		if data.step != 1 {
+			if linkVal, exists := nodeValuesFromLinks[id]; exists {
+				val = linkVal
+			}
+		}
+		pct := 0.0
+		if totalSessions > 0 {
+			pct = (float64(val) / float64(totalSessions)) * 100
+		}
+		finalNodes = append(finalNodes, domain.SankeyNode{
+			ID:         id,
+			Label:      data.path,
+			NodeColor:  data.color,
+			Percentage: math.Round(pct*100) / 100,
+			Value:      val,
+			Step:       data.step,
+		})
+	}
+
+	// Sort nodes by step ASC, value DESC
+	sort.Slice(finalNodes, func(i, j int) bool {
+		if finalNodes[i].Step != finalNodes[j].Step {
+			return finalNodes[i].Step < finalNodes[j].Step
+		}
+		return finalNodes[i].Value > finalNodes[j].Value
+	})
+
+	// Final link validation: ensure all endpoints exist in finalNodes
+	finalNodeIDSet := make(map[string]bool)
+	for _, n := range finalNodes {
+		finalNodeIDSet[n.ID] = true
+	}
+
+	var validLinks []domain.SankeyLink
+	for _, l := range filteredLinks {
+		if finalNodeIDSet[l.Source] && finalNodeIDSet[l.Target] {
+			validLinks = append(validLinks, l)
+		}
+	}
+
+	if finalNodes == nil {
+		finalNodes = []domain.SankeyNode{}
+	}
+	if validLinks == nil {
+		validLinks = []domain.SankeyLink{}
+	}
+
+	return &domain.UserJourneyResult{
+		Nodes: finalNodes,
+		Links: validLinks,
+	}, nil
+}
+
