@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/oschwald/geoip2-golang v1.13.0
-	github.com/rakibhoossain/ua-parser-go v0.0.0-20260924124642-b2ed0fb6b0de
+	github.com/rakibhoossain/ua-parser-go v0.0.0-20260924151221-0118eee31445
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/segmentio/kafka-go v0.4.51
 )
