@@ -1,0 +1,10 @@
+{
+  "extends": "../../../tooling/typescript/sdk.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "incremental": false,
+    "outDir": "dist",
+    "strictNullChecks": true
+  },
+  "exclude": ["dist"]
+}

@@ -3,6 +3,7 @@ package ingest
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -62,10 +63,41 @@ func NewHandler(cfg Config) *Handler {
 	}
 }
 
+// HandleReplay handles POST /api/v1/replay.
+func (h *Handler) HandleReplay(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read request body: "+err.Error())
+		return
+	}
+	h.processReplay(w, r, bodyBytes)
+}
+
 // HandleTrack handles POST /api/v1/track.
 func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_BODY", "Failed to read body: "+err.Error())
+		return
+	}
+
+	// Check if this is an envelope request: { "type": "replay" | "track", "payload": ... }
+	var envelope struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Type != "" {
+		if envelope.Type == "replay" {
+			h.processReplay(w, r, envelope.Payload)
+			return
+		}
+		if (envelope.Type == "track" || envelope.Type == "identify") && len(envelope.Payload) > 0 {
+			bodyBytes = envelope.Payload
+		}
+	}
+
 	var req TrackRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		httputil.Error(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse JSON body: "+err.Error())
 		return
 	}
@@ -541,3 +573,128 @@ func resolveDeviceType(res *uaparser.Result) string {
 	}
 	return "unknown"
 }
+
+func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []byte) {
+	var payload ReplayChunkPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_REPLAY_JSON", "Failed to parse replay payload: "+err.Error())
+		return
+	}
+
+	if payload.SessionID == "" && payload.AltSessionID != "" {
+		payload.SessionID = payload.AltSessionID
+	}
+	if payload.ShopID == "" && payload.AltShopID != "" {
+		payload.ShopID = payload.AltShopID
+	}
+	if payload.TenantID == "" && payload.AltTenantID != "" {
+		payload.TenantID = payload.AltTenantID
+	}
+	if payload.ChunkIndex == 0 && payload.AltChunkIndex != 0 {
+		payload.ChunkIndex = payload.AltChunkIndex
+	}
+	if payload.EventsCount == 0 && payload.AltEventsCount != 0 {
+		payload.EventsCount = payload.AltEventsCount
+	}
+	if !payload.IsFullSnapshot && payload.AltSnapshot {
+		payload.IsFullSnapshot = payload.AltSnapshot
+	}
+	if payload.StartedAt == "" && payload.AltStartedAt != "" {
+		payload.StartedAt = payload.AltStartedAt
+	}
+	if payload.EndedAt == "" && payload.AltEndedAt != "" {
+		payload.EndedAt = payload.AltEndedAt
+	}
+
+	if payload.SessionID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SESSION_ID", "Session ID is required for replay")
+		return
+	}
+
+	sessionID, err := uuid.Parse(payload.SessionID)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SESSION_ID", "Invalid session_id UUID: "+err.Error())
+		return
+	}
+
+	shopIDStr := payload.ShopID
+	if shopIDStr == "" {
+		shopIDStr = r.Header.Get("X-Shop-Id")
+	}
+	if shopIDStr == "" {
+		shopIDStr = r.Header.Get("openpanel-client-id")
+	}
+	if shopIDStr == "" {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "shop_id is required")
+		return
+	}
+	shopID, err := uuid.Parse(shopIDStr)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Invalid shop_id UUID: "+err.Error())
+		return
+	}
+
+	tenantIDStr := payload.TenantID
+	if tenantIDStr == "" {
+		tenantIDStr = r.Header.Get("X-Tenant-Id")
+	}
+	var tenantID uuid.UUID
+	if tenantIDStr != "" {
+		if tid, err := uuid.Parse(tenantIDStr); err == nil {
+			tenantID = tid
+		}
+	}
+
+	startedAt := parseTimestampString(payload.StartedAt)
+	endedAt := parseTimestampString(payload.EndedAt)
+	if endedAt.Before(startedAt) {
+		endedAt = startedAt
+	}
+
+	chunk := &domain.ReplayChunk{
+		TenantID:       tenantID,
+		ShopID:         shopID,
+		SessionID:      sessionID,
+		ChunkIndex:     payload.ChunkIndex,
+		StartedAt:      startedAt,
+		EndedAt:        endedAt,
+		EventsCount:    payload.EventsCount,
+		IsFullSnapshot: payload.IsFullSnapshot,
+		Payload:        payload.Payload,
+	}
+
+	if h.chWriter != nil {
+		if err := h.chWriter.AddReplayChunk(r.Context(), chunk); err != nil {
+			httputil.Error(w, http.StatusInternalServerError, "INGEST_FAILED", "Failed to buffer replay chunk: "+err.Error())
+			return
+		}
+	}
+
+	httputil.JSON(w, http.StatusAccepted, ReplayResponse{
+		Status:     "accepted",
+		ChunkIndex: payload.ChunkIndex,
+		SessionID:  sessionID.String(),
+	})
+}
+
+func parseTimestampString(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Now().UTC()
+	}
+	formats := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05.000",
+		"2006-01-02 15:04:05",
+	}
+	for _, f := range formats {
+		if t, err := time.Parse(f, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Now().UTC()
+}
+

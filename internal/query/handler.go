@@ -187,6 +187,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Get("/session.sessions", h.HandleTRPCSessionList)
 		r.Get("/session.list", h.HandleTRPCSessionList)
 		r.Get("/session.byId", h.HandleTRPCSessionById)
+		r.Get("/session.replayChunksFrom", h.HandleTRPCReplayChunksFrom)
 
 		// Profile
 		r.Get("/profile.list", h.HandleTRPCProfileList)
@@ -1916,10 +1917,97 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 			sess["browser"] = browser
 			sess["device"] = device
 		}
+
+		// Check if this session has recorded replay chunks
+		var replayCount uint64
+		replayCheckQuery := fmt.Sprintf(`
+			SELECT count()
+			FROM %s.session_replay_chunks
+			WHERE session_id = ?
+		`, h.queryService.database)
+		if err := h.queryService.Conn().QueryRow(r.Context(), replayCheckQuery, parsedID).Scan(&replayCount); err == nil {
+			sess["hasReplay"] = replayCount > 0
+		}
 	}
 
 	sendTRPCResponse(w, sess)
 }
+
+func (h *Handler) HandleTRPCReplayChunksFrom(w http.ResponseWriter, r *http.Request) {
+	input := parseTRPCInput(r)
+	sessIDStr := ""
+	fromIndex := 0
+	if input != nil {
+		if sid, ok := input["sessionId"].(string); ok {
+			sessIDStr = sid
+		}
+		if fi, ok := input["fromIndex"].(float64); ok {
+			fromIndex = int(fi)
+		}
+	}
+	if sessIDStr == "" {
+		sessIDStr = r.URL.Query().Get("sessionId")
+	}
+
+	sessionID, err := uuid.Parse(sessIDStr)
+	if err != nil {
+		sendTRPCResponse(w, map[string]any{
+			"data":    []any{},
+			"hasMore": false,
+		})
+		return
+	}
+
+	const pageSize = 50
+	query := fmt.Sprintf(`
+		SELECT chunk_index, payload
+		FROM %s.session_replay_chunks
+		WHERE session_id = ?
+		ORDER BY started_at, chunk_index
+		LIMIT ? OFFSET ?
+	`, h.queryService.database)
+
+	rows, err := h.queryService.Conn().Query(r.Context(), query, sessionID, pageSize+1, fromIndex)
+	if err != nil {
+		sendTRPCResponse(w, map[string]any{
+			"data":    []any{},
+			"hasMore": false,
+		})
+		return
+	}
+	defer rows.Close()
+
+	type chunkItem struct {
+		ChunkIndex int   `json:"chunkIndex"`
+		Events     []any `json:"events"`
+	}
+
+	var allChunks []chunkItem
+	for rows.Next() {
+		var chunkIdx uint16
+		var payloadStr string
+		if err := rows.Scan(&chunkIdx, &payloadStr); err == nil {
+			var events []any
+			if err := json.Unmarshal([]byte(payloadStr), &events); err == nil {
+				allChunks = append(allChunks, chunkItem{
+					ChunkIndex: int(chunkIdx),
+					Events:     events,
+				})
+			}
+		}
+	}
+
+	hasMore := len(allChunks) > pageSize
+	if hasMore {
+		allChunks = allChunks[:pageSize]
+	}
+
+	sendTRPCResponse(w, map[string]any{
+		"data":    allChunks,
+		"hasMore": hasMore,
+	})
+}
+
 
 func (h *Handler) HandleTRPCGroupList(w http.ResponseWriter, r *http.Request) {
 	sendTRPCResponse(w, map[string]any{

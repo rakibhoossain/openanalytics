@@ -34,6 +34,7 @@ type BatchWriter struct {
 	eventsBuffer   []*domain.Event
 	sessionsBuffer []*domain.Session
 	featuresBuffer []*domain.ShopperFeature
+	replayBuffer   []*domain.ReplayChunk
 
 	flushTimer *time.Timer
 	isClosed   bool
@@ -84,6 +85,7 @@ func NewBatchWriter(ctx context.Context, cfg Config) (*BatchWriter, error) {
 		eventsBuffer:   make([]*domain.Event, 0, cfg.BatchSize),
 		sessionsBuffer: make([]*domain.Session, 0, 500),
 		featuresBuffer: make([]*domain.ShopperFeature, 0, 500),
+		replayBuffer:   make([]*domain.ReplayChunk, 0, 200),
 	}
 
 	return w, nil
@@ -145,7 +147,33 @@ func (w *BatchWriter) AddShopperFeature(feat *domain.ShopperFeature) {
 	w.mu.Unlock()
 }
 
-// Flush writes all buffered events, sessions, and ML shopper features to ClickHouse.
+// AddReplayChunk buffers an rrweb session replay chunk and flushes if capacity reached.
+func (w *BatchWriter) AddReplayChunk(ctx context.Context, chunk *domain.ReplayChunk) error {
+	if chunk == nil {
+		return nil
+	}
+	w.mu.Lock()
+	if w.isClosed {
+		w.mu.Unlock()
+		return fmt.Errorf("batch writer is closed")
+	}
+	w.replayBuffer = append(w.replayBuffer, chunk)
+	shouldFlush := len(w.replayBuffer) >= 50
+
+	if len(w.replayBuffer) >= 1 && w.flushTimer == nil {
+		w.flushTimer = time.AfterFunc(w.flushInterval, func() {
+			_ = w.Flush(context.Background())
+		})
+	}
+	w.mu.Unlock()
+
+	if shouldFlush {
+		return w.Flush(ctx)
+	}
+	return nil
+}
+
+// Flush writes all buffered events, sessions, ML features, and replay chunks to ClickHouse.
 func (w *BatchWriter) Flush(ctx context.Context) error {
 	w.mu.Lock()
 	if w.flushTimer != nil {
@@ -153,7 +181,7 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 		w.flushTimer = nil
 	}
 
-	if len(w.eventsBuffer) == 0 && len(w.sessionsBuffer) == 0 && len(w.featuresBuffer) == 0 {
+	if len(w.eventsBuffer) == 0 && len(w.sessionsBuffer) == 0 && len(w.featuresBuffer) == 0 && len(w.replayBuffer) == 0 {
 		w.mu.Unlock()
 		return nil
 	}
@@ -161,9 +189,11 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 	events := w.eventsBuffer
 	sessions := w.sessionsBuffer
 	features := w.featuresBuffer
+	replays := w.replayBuffer
 	w.eventsBuffer = make([]*domain.Event, 0, w.batchSize)
 	w.sessionsBuffer = make([]*domain.Session, 0, 500)
 	w.featuresBuffer = make([]*domain.ShopperFeature, 0, 500)
+	w.replayBuffer = make([]*domain.ReplayChunk, 0, 200)
 	w.mu.Unlock()
 
 	// 1. Flush Events
@@ -191,6 +221,15 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 		} else {
 			log.Printf("[ClickHouse] Flushed %d shopper features successfully", len(features))
 		}
+	}
+
+	// 4. Flush Session Replay Chunks
+	if len(replays) > 0 {
+		if err := w.flushReplayChunksWithRetry(ctx, replays); err != nil {
+			log.Printf("[ClickHouse] ERROR flushing %d replay chunks: %v", len(replays), err)
+			return err
+		}
+		log.Printf("[ClickHouse] Flushed %d replay chunks successfully", len(replays))
 	}
 
 	return nil
@@ -344,6 +383,41 @@ func (w *BatchWriter) flushShopperFeaturesWithRetry(ctx context.Context, feature
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append shopper feature to batch: %w", err)
+		}
+	}
+
+	return batch.Send()
+}
+
+func (w *BatchWriter) flushReplayChunksWithRetry(ctx context.Context, chunks []*domain.ReplayChunk) error {
+	query := fmt.Sprintf(`INSERT INTO %s.session_replay_chunks (
+		tenant_id, shop_id, session_id, chunk_index,
+		started_at, ended_at, events_count, is_full_snapshot, payload
+	)`, w.database)
+
+	batch, err := w.conn.PrepareBatch(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to prepare replay chunks batch: %w", err)
+	}
+
+	for _, c := range chunks {
+		var isFullSnapshot uint8
+		if c.IsFullSnapshot {
+			isFullSnapshot = 1
+		}
+		err := batch.Append(
+			c.TenantID,
+			c.ShopID,
+			c.SessionID,
+			c.ChunkIndex,
+			c.StartedAt.UTC(),
+			c.EndedAt.UTC(),
+			c.EventsCount,
+			isFullSnapshot,
+			c.Payload,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to append replay chunk to batch: %w", err)
 		}
 	}
 

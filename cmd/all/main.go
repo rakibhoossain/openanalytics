@@ -141,6 +141,7 @@ func main() {
 
 	ingestRouter.Route("/api/v1", func(r chi.Router) {
 		r.Post("/track", ingestHandler.HandleTrack)
+		r.Post("/replay", ingestHandler.HandleReplay)
 		r.Post("/batch", ingestHandler.HandleBatch)
 		r.Post("/track/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
@@ -262,6 +263,7 @@ func main() {
 
 	// In all-in-one unified mode, also route /api/v1/track on 8081 for direct UI convenience
 	queryRouter.Post("/api/v1/track", ingestHandler.HandleTrack)
+	queryRouter.Post("/api/v1/replay", ingestHandler.HandleReplay)
 	queryRouter.Post("/api/v1/batch", ingestHandler.HandleBatch)
 	queryRouter.Post("/api/v1/track/batch", ingestHandler.HandleBatch)
 	queryRouter.Get("/api/v1/track/device-id", ingestHandler.HandleDeviceID)

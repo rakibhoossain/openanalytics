@@ -120,6 +120,34 @@ type DeviceIDResponse struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// ReplayChunkPayload represents an incoming rrweb session recording chunk.
+type ReplayChunkPayload struct {
+	TenantID       string `json:"tenant_id,omitempty"`
+	AltTenantID    string `json:"tenantId,omitempty"`
+	ShopID         string `json:"shop_id,omitempty"`
+	AltShopID      string `json:"shopId,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	AltSessionID   string `json:"sessionId,omitempty"`
+	ChunkIndex     uint16 `json:"chunk_index"`
+	AltChunkIndex  uint16 `json:"chunkIndex"`
+	EventsCount    uint16 `json:"events_count"`
+	AltEventsCount uint16 `json:"eventsCount"`
+	IsFullSnapshot bool   `json:"is_full_snapshot"`
+	AltSnapshot    bool   `json:"isFullSnapshot"`
+	StartedAt      string `json:"started_at"`
+	AltStartedAt   string `json:"startedAt"`
+	EndedAt        string `json:"ended_at"`
+	AltEndedAt     string `json:"endedAt"`
+	Payload        string `json:"payload"`
+}
+
+// ReplayResponse is returned on successful replay chunk ingestion.
+type ReplayResponse struct {
+	Status     string `json:"status"`
+	ChunkIndex uint16 `json:"chunk_index"`
+	SessionID  string `json:"session_id"`
+}
+
 // FlattenProperties recursively converts nested objects, booleans, and numbers into
 // a flat dot-notation Map(String, String) matching OpenPanel's toDots.
 func FlattenProperties(raw map[string]interface{}) map[string]string {

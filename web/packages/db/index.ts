@@ -642,7 +642,26 @@ export const getRetentionCohort: any = asyncNoop;
 export const getSegmentDailySeriesCore: any = asyncNoop;
 export const getSessionDistinctValues: any = asyncNoop;
 export const getSessionList: any = asyncNoop;
-export const getSessionReplayChunksFrom: any = asyncNoop;
+export const getSessionReplayChunksFrom = async (
+  sessionId: string,
+  projectId: string,
+  fromIndex = 0
+) => {
+  try {
+    const apiUrl =
+      process.env.API_URL_SSR || process.env.API_URL || 'http://localhost:8081';
+    const res = await fetch(
+      `${apiUrl}/trpc/session.replayChunksFrom?input=${encodeURIComponent(
+        JSON.stringify({ sessionId, projectId, fromIndex })
+      )}`
+    );
+    if (res.ok) {
+      const json = await res.json();
+      return json?.result?.data?.json ?? { data: [], hasMore: false };
+    }
+  } catch {}
+  return { data: [], hasMore: false };
+};
 export const getShareDashboardById: any = asyncNoop;
 export const getShareOverviewById: any = asyncNoop;
 export const getShareReportById: any = asyncNoop;

@@ -1,0 +1,21 @@
+{
+  "name": "@openanalytics/web",
+  "version": "1.0.0-local",
+  "license": "MIT",
+  "module": "index.ts",
+  "scripts": {
+    "build": "rm -rf dist && tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openanalytics/sdk": "workspace:*",
+    "@rrweb/types": "2.0.0-alpha.20",
+    "rrweb": "2.0.0-alpha.20"
+  },
+  "devDependencies": {
+    "@openpanel/tsconfig": "workspace:*",
+    "@types/node": "catalog:",
+    "tsup": "^7.2.0",
+    "typescript": "catalog:"
+  }
+}

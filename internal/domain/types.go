@@ -191,4 +191,17 @@ type UserJourneyResult struct {
 	Links []SankeyLink `json:"links"`
 }
 
+// ReplayChunk represents a chunk of rrweb session recording events.
+type ReplayChunk struct {
+	TenantID       uuid.UUID `json:"tenant_id"`
+	ShopID         uuid.UUID `json:"shop_id"`
+	SessionID      uuid.UUID `json:"session_id"`
+	ChunkIndex     uint16    `json:"chunk_index"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at"`
+	EventsCount    uint16    `json:"events_count"`
+	IsFullSnapshot bool      `json:"is_full_snapshot"`
+	Payload        string    `json:"payload"`
+}
+
 

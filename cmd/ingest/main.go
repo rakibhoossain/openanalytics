@@ -102,6 +102,7 @@ func main() {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/track", ingestHandler.HandleTrack)
+		r.Post("/replay", ingestHandler.HandleReplay)
 		r.Post("/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
 	})

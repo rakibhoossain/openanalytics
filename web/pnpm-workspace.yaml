@@ -1,6 +1,7 @@
 packages:
   - "."
   - "packages/*"
+  - "packages/sdks/*"
   - "tooling/*"
 
 allowBuilds:

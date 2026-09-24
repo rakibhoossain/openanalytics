@@ -126,9 +126,27 @@ PARTITION BY toYYYYMM(last_event_at)
 ORDER BY (tenant_id, shop_id, device_id, session_id)
 SETTINGS index_granularity = 8192;
 
+-- OpenAnalytics Session Replay Chunks Store
+CREATE TABLE IF NOT EXISTS openpanel.session_replay_chunks (
+    tenant_id UUID,
+    shop_id UUID,
+    session_id UUID,
+    chunk_index UInt16,
+    started_at DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(3)),
+    ended_at DateTime64(3, 'UTC') CODEC(DoubleDelta, ZSTD(3)),
+    events_count UInt16,
+    is_full_snapshot UInt8,
+    payload String CODEC(ZSTD(6))
+) ENGINE = ReplacingMergeTree()
+PARTITION BY toYYYYMM(started_at)
+ORDER BY (tenant_id, shop_id, session_id, started_at, chunk_index)
+TTL toDateTime(started_at) + toIntervalDay(30)
+SETTINGS index_granularity = 8192;
+
 -- Default Database Views (ensures DBeaver, IDEs, and tools querying 'default' DB see all data)
 CREATE VIEW IF NOT EXISTS default.events AS SELECT * FROM openpanel.events;
 CREATE VIEW IF NOT EXISTS default.sessions AS SELECT * FROM openpanel.sessions;
 CREATE VIEW IF NOT EXISTS default.hourly_metrics AS SELECT * FROM openpanel.hourly_metrics;
 CREATE VIEW IF NOT EXISTS default.project_insights AS SELECT * FROM openpanel.project_insights;
 CREATE VIEW IF NOT EXISTS default.shopper_features AS SELECT * FROM openpanel.shopper_features;
+CREATE VIEW IF NOT EXISTS default.session_replay_chunks AS SELECT * FROM openpanel.session_replay_chunks;
