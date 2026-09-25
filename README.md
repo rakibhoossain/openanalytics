@@ -122,20 +122,20 @@ OpenAnalytics runs three specialized behavioral models simultaneously on every a
 - **Key Inputs**: Cart additions, cart velocity, product views, total dwell time, and catalog dispersion.
 - **Formulation**:
   $$z_{\text{intent}} = w_{\text{carts}} \cdot x_{\text{carts}} + w_{\text{dwell}} \cdot \ln(1 + x_{\text{dwell}}) - w_{\text{scatter}} \cdot x_{\text{scatter}} + b$$
-- **Business Trigger**: Shoppers scoring $\ge 85\%$ trigger 1-click checkout acceleration and inventory reservations.
+- **Business Trigger**: Shoppers scoring &ge; 85% trigger 1-click checkout acceleration and inventory reservations.
 
 #### 2. Session Churn & Bounce Hazard (`churn_predictor_v1`)
 - **Objective**: Identify immediate drop-off and cart abandonment risk before the visitor navigates away.
 - **Key Inputs**: Zero scroll depth, hesitation pauses, catalog fatigue, and stagnant dwell with unpurchased items.
 - **Formulation**:
-  $$z_{\text{churn}} = b_{\text{churn}} - w_{c} \cdot x_{\text{carts}} - w_{s} \cdot x_{\text{scroll}} + w_{\text{hesitation}} \cdot x_{\text{idle}}$$
-- **Business Trigger**: Active carts with churn risk $\ge 60\%$ automatically trigger exit-intent recovery or shipping incentives.
+  $$z_{\text{churn}} = b_{\text{churn}} - w_{\text{carts}} \cdot x_{\text{carts}} - w_{\text{scroll}} \cdot x_{\text{scroll}} + w_{\text{idle}} \cdot x_{\text{idle}}$$
+- **Business Trigger**: Active carts with churn risk &ge; 60% automatically trigger exit-intent recovery or shipping incentives.
 
 #### 3. Price Sensitivity & Bargain Affinity (`price_sensitivity_v1`)
 - **Objective**: Segment price-sensitive coupon hunters from high-AOV impulse buyers to prevent margin erosion.
 - **Key Inputs**: Sale collection views, promo dwell duration, price sort toggles, and coupon interaction events.
 - **Formulation**:
-  $$z_{\text{price}} = w_{\text{sale}} \cdot x_{\text{sale\_dwell}} + w_{\text{coupon}} \cdot x_{\text{coupon\_views}} - b_{\text{price}}$$
+  $$z_{\text{price}} = w_{\text{sale}} \cdot x_{\text{sale}} + w_{\text{coupon}} \cdot x_{\text{coupon}} - b_{\text{price}}$$
 - **Business Trigger**: Dynamic promotional discounts are deployed selectively only to price-sensitive shoppers, preserving full retail margins on high-intent buyers.
 
 ---
