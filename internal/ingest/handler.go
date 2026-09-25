@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -246,6 +247,7 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		event.Latitude = loc.Latitude
 		event.Longitude = loc.Longitude
 	}
+	enrichGeoFallbacks(event, r, flatProps, clientIP)
 
 	// Produce to Kafka with reliable direct fallback
 	if h.producer != nil {
@@ -421,6 +423,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			event.Latitude = itemLoc.Latitude
 			event.Longitude = itemLoc.Longitude
 		}
+		enrichGeoFallbacks(event, r, itemFlatProps, eventIP)
 
 		events = append(events, event)
 	}
@@ -597,6 +600,48 @@ func (h *Handler) extractClientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func isLocalIP(ipStr string) bool {
+	if ipStr == "127.0.0.1" || ipStr == "::1" || ipStr == "localhost" || ipStr == "" {
+		return true
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+}
+
+func enrichGeoFallbacks(event *domain.Event, r *http.Request, flatProps map[string]string, clientIP string) {
+	if event.Country == "" {
+		if c := r.Header.Get("CF-IPCountry"); len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if c := r.Header.Get("X-Country-Code"); len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if c := r.Header.Get("X-Country"); len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if c, ok := flatProps["country"]; ok && len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if c, ok := flatProps["$country"]; ok && len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if c, ok := flatProps["__country"]; ok && len(c) == 2 {
+			event.Country = strings.ToUpper(c)
+		} else if devCountry := os.Getenv("DEV_DEFAULT_COUNTRY"); len(devCountry) == 2 && isLocalIP(clientIP) {
+			event.Country = strings.ToUpper(devCountry)
+		}
+	}
+	if event.City == "" {
+		if c, ok := flatProps["city"]; ok && c != "" {
+			event.City = c
+		} else if c, ok := flatProps["$city"]; ok && c != "" {
+			event.City = c
+		} else if c, ok := flatProps["__city"]; ok && c != "" {
+			event.City = c
+		} else if devCity := os.Getenv("DEV_DEFAULT_CITY"); devCity != "" && isLocalIP(clientIP) {
+			event.City = devCity
+		}
+	}
 }
 
 func resolveDeviceType(res *uaparser.Result) string {

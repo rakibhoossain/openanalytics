@@ -31,3 +31,5 @@ data/clickhouse
 .DS_Store
 Thumbs.db
 openanalytics.log
+server.log
+/ml/training/__pycache__

@@ -60,27 +60,33 @@ function ReplayChunkLoader({
 }) {
   const trpc = useTRPC();
   const queryClient = useQueryClient();
-  const { addEvent, refreshDuration } = useReplayContext();
+  const { isReady, addEvent, refreshDuration } = useReplayContext();
 
   useEffect(() => {
-    function recursive(fromIndex: number) {
+    if (!isReady) return;
+
+    let canceled = false;
+    function recursive(currentIndex: number) {
+      if (canceled) return;
       queryClient
         .fetchQuery(
           trpc.session.replayChunksFrom.queryOptions({
             sessionId,
             projectId,
-            fromIndex,
+            fromIndex: currentIndex,
           })
         )
-        .then((res) => {
-          res.data.forEach((row) => {
+        .then((res: any) => {
+          if (canceled) return;
+          const chunks = (res?.data || []) as Array<{ events?: any[] }>;
+          chunks.forEach((row) => {
             row?.events?.forEach((event) => {
               addEvent(event);
             });
           });
           refreshDuration();
-          if (res.hasMore) {
-            recursive(fromIndex + res.data.length);
+          if (res?.hasMore) {
+            recursive(currentIndex + chunks.length);
           }
         })
         .catch(() => {
@@ -89,7 +95,10 @@ function ReplayChunkLoader({
     }
 
     recursive(fromIndex);
-  }, []);
+    return () => {
+      canceled = true;
+    };
+  }, [isReady, sessionId, projectId, fromIndex, queryClient, trpc, addEvent, refreshDuration]);
 
   return null;
 }
@@ -162,16 +171,17 @@ function ReplayContent({
     })
   );
 
+  const batchData = firstBatch as any;
   const events = eventsData?.data ?? [];
   const playerEvents =
-    firstBatch?.data.flatMap((row) => row?.events ?? []) ?? [];
-  const hasMore = firstBatch?.hasMore ?? false;
+    (batchData?.data as any[])?.flatMap((row: any) => row?.events ?? []) ?? [];
+  const hasMore = !!batchData?.hasMore;
   const hasReplay = playerEvents.length !== 0;
 
   function renderReplay() {
     if (replayLoading) {
       return (
-        <div className="col h-[320px] items-center justify-center gap-4 bg-background">
+        <div className="col h-80 items-center justify-center gap-4 bg-background">
           <div className="h-8 w-8 animate-pulse rounded-full bg-muted" />
           <div>Loading session replay</div>
         </div>
@@ -181,7 +191,7 @@ function ReplayContent({
       return <ReplayPlayer events={playerEvents} />;
     }
     return (
-      <div className="flex h-[320px] items-center justify-center bg-background text-muted-foreground text-sm">
+      <div className="flex h-80 items-center justify-center bg-background text-muted-foreground text-sm">
         No replay data available for this session.
       </div>
     );
@@ -222,7 +232,7 @@ function ReplayContent({
       </div>
       {hasReplay && hasMore && (
         <ReplayChunkLoader
-          fromIndex={firstBatch?.data?.length ?? 0}
+          fromIndex={(batchData?.data as any[])?.length ?? 0}
           projectId={projectId}
           sessionId={sessionId}
         />

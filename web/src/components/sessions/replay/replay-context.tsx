@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { sanitizeReplayEvents } from './replay-utils';
 
 export interface ReplayPlayerInstance {
   play: () => void;
@@ -99,8 +100,14 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
+  const durationRef = useRef(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [isReady, setIsReady] = useState(false);
+
+  const setDurationWithRef = useCallback((d: number) => {
+    durationRef.current = d;
+    setDuration(d);
+  }, []);
 
   const setIsPlayingWithRef = useCallback((playing: boolean) => {
     isPlayingRef.current = playing;
@@ -118,6 +125,10 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
   // Updates the ref and notifies subscribers — no React state update here.
   const setCurrentTime = useCallback((t: number) => {
     currentTimeRef.current = t;
+    if (t > durationRef.current) {
+      durationRef.current = t;
+      setDuration(t);
+    }
     for (const fn of listenersRef.current) {
       fn(t);
     }
@@ -130,6 +141,11 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
       currentTimeRef.current = 0;
       setIsPlayingWithRef(false);
       setIsReady(true);
+      const meta = player.getMetaData();
+      if (meta.totalTime > 0) {
+        durationRef.current = meta.totalTime;
+        setDuration(meta.totalTime);
+      }
     },
     [setIsPlayingWithRef],
   );
@@ -138,6 +154,7 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
     playerRef.current = null;
     setIsReady(false);
     currentTimeRef.current = 0;
+    durationRef.current = 0;
     setDuration(0);
     setStartTime(null);
     setIsPlayingWithRef(false);
@@ -166,14 +183,23 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
 
   const addEvent = useCallback(
     (event: { type: number; data: unknown; timestamp: number }) => {
-      playerRef.current?.addEvent(event);
+      try {
+        const cloned = JSON.parse(JSON.stringify(event));
+        sanitizeReplayEvents([cloned]);
+        playerRef.current?.addEvent(cloned);
+      } catch {
+        playerRef.current?.addEvent(event);
+      }
     },
     [],
   );
 
   const refreshDuration = useCallback(() => {
     const total = playerRef.current?.getMetaData().totalTime ?? 0;
-    if (total > 0) setDuration(total);
+    if (total > durationRef.current) {
+      durationRef.current = total;
+      setDuration(total);
+    }
   }, []);
 
   const value: ReplayContextValue = {
@@ -194,7 +220,7 @@ export function ReplayProvider({ children }: { children: ReactNode }) {
     onPlayerDestroy,
     setCurrentTime,
     setIsPlaying: setIsPlayingWithRef,
-    setDuration,
+    setDuration: setDurationWithRef,
   };
 
   return (

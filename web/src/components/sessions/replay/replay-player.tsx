@@ -1,10 +1,11 @@
 import { useReplayContext } from '@/components/sessions/replay/replay-context';
 import type { ReplayPlayerInstance } from '@/components/sessions/replay/replay-context';
+import { sanitizeReplayEvents } from './replay-utils';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import 'rrweb-player/dist/style.css';
 
-/** rrweb meta event (type 4) carries the recorded viewport size */
+/** rrweb meta event (type 4) carries the recorded viewport size and page URL */
 function getRecordedDimensions(
   events: Array<{ type: number; data: unknown }>,
 ): { width: number; height: number } | null {
@@ -53,8 +54,19 @@ export function ReplayPlayer({
     [events],
   );
 
+  const sanitizedEvents = useMemo(() => {
+    try {
+      const cloned: Array<{ type: number; data: unknown; timestamp: number }> =
+        JSON.parse(JSON.stringify(events));
+      cloned.sort((a, b) => a.timestamp - b.timestamp);
+      return sanitizeReplayEvents(cloned);
+    } catch {
+      return events;
+    }
+  }, [events]);
+
   useEffect(() => {
-    if (!events.length || !containerRef.current) return;
+    if (!sanitizedEvents.length || !containerRef.current) return;
 
     // Clear any previous player DOM
     containerRef.current.innerHTML = '';
@@ -80,7 +92,7 @@ export function ReplayPlayer({
         player = new PlayerConstructor({
           target: containerRef.current,
           props: {
-            events,
+            events: sanitizedEvents,
             width,
             height,
             autoPlay: false,
@@ -130,8 +142,16 @@ export function ReplayPlayer({
 
         // Notify context — marks isReady = true and sets initial duration
         const meta = player.getMetaData();
-        if (meta.totalTime > 0) setDuration(meta.totalTime);
-        onPlayerReady(player, meta.startTime);
+        let totalDuration = meta.totalTime;
+        if (totalDuration <= 0 && sanitizedEvents.length > 1) {
+          const firstTs = sanitizedEvents[0].timestamp;
+          const lastTs = sanitizedEvents[sanitizedEvents.length - 1].timestamp;
+          if (lastTs > firstTs) {
+            totalDuration = lastTs - firstTs;
+          }
+        }
+        if (totalDuration > 0) setDuration(totalDuration);
+        onPlayerReady(player, meta.startTime || (sanitizedEvents[0]?.timestamp ?? 0));
       })
       .catch(() => {
         if (mounted) setImportError(true);
@@ -162,7 +182,7 @@ export function ReplayPlayer({
       playerRef.current = null;
       onPlayerDestroy();
     };
-  }, [events, recordedDimensions, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, setDuration]);
+  }, [sanitizedEvents, recordedDimensions, onPlayerReady, onPlayerDestroy, setCurrentTime, setIsPlaying, setDuration]);
 
   if (importError) {
     return (

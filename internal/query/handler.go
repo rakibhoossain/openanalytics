@@ -68,7 +68,16 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Route("/api/live", mountLive)
 	}
 
+	// Favicon and Icon Proxy routes
+	mountMisc := func(r chi.Router) {
+		r.Get("/favicon", h.HandleFaviconProxy)
+		r.Get("/favicon/clear", h.HandleFaviconClear)
+	}
+	r.Route("/misc", mountMisc)
+	r.Route("/api/v1/misc", mountMisc)
+
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Route("/misc", mountMisc)
 		// Analytics Query APIs
 		r.Route("/query", func(r chi.Router) {
 			r.Get("/trends", h.HandleTrends)
@@ -588,112 +597,7 @@ func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, e
 
 // HandleIntents returns real-time scored shoppers from Redis feature store.
 func (h *Handler) HandleIntents(w http.ResponseWriter, r *http.Request) {
-	shopID := r.Header.Get("X-Shop-ID")
-	if shopID == "" {
-		shopID = r.URL.Query().Get("shop_id")
-	}
-	if shopID == "" {
-		shopID = "018e69d0-7a89-7000-8b1a-200000000002"
-	}
-
-	type IntentItem struct {
-		Device    string  `json:"device"`
-		Intent    float64 `json:"intent"`
-		Status    string  `json:"status"`
-		Signals   string  `json:"signals"`
-		Views     int64   `json:"views"`
-		Carts     int64   `json:"carts"`
-		DwellSecs int64   `json:"dwell_seconds"`
-	}
-
-	if h.rdb == nil {
-		httputil.JSON(w, http.StatusOK, []IntentItem{})
-		return
-	}
-
-	ctx := r.Context()
-	pattern := fmt.Sprintf("shopper:intent:%s:*", shopID)
-	keys, err := h.rdb.Keys(ctx, pattern).Result()
-	if err != nil || len(keys) == 0 {
-		keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
-	}
-
-	var results []IntentItem
-	for _, k := range keys {
-		val, err := h.rdb.Get(ctx, k).Float64()
-		if err != nil {
-			continue
-		}
-
-		parts := strings.Split(k, ":")
-		devID := parts[len(parts)-1]
-
-		status := "EXPLORING"
-		if val >= 0.85 {
-			status = "HIGH INTENT"
-		} else if val >= 0.50 {
-			status = "CONSIDERING"
-		} else if val < 0.25 {
-			status = "CASUAL"
-		}
-
-		actualShopID := shopID
-		if len(parts) >= 4 {
-			actualShopID = parts[2]
-		}
-		featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
-		fvals, _ := h.rdb.HMGet(ctx, featKey, "views", "carts", "first_seen_ms", "last_seen_ms").Result()
-		var views, carts, firstSeen, lastSeen int64
-		if len(fvals) >= 2 {
-			if fvals[0] != nil {
-				fmt.Sscan(fvals[0].(string), &views)
-			}
-			if fvals[1] != nil {
-				fmt.Sscan(fvals[1].(string), &carts)
-			}
-		}
-		if len(fvals) >= 4 {
-			if fvals[2] != nil {
-				fmt.Sscan(fvals[2].(string), &firstSeen)
-			}
-			if fvals[3] != nil {
-				fmt.Sscan(fvals[3].(string), &lastSeen)
-			}
-		}
-
-		dwell := int64(0)
-		if lastSeen > firstSeen {
-			dwell = (lastSeen - firstSeen) / 1000
-		}
-
-		signals := fmt.Sprintf("%d views", views)
-		if carts > 0 {
-			signals += fmt.Sprintf(", %d cart", carts)
-		}
-		if dwell > 0 {
-			signals += fmt.Sprintf(", %ds dwell", dwell)
-		}
-
-		results = append(results, IntentItem{
-			Device:    devID,
-			Intent:    val,
-			Status:    status,
-			Signals:   signals,
-			Views:     views,
-			Carts:     carts,
-			DwellSecs: dwell,
-		})
-
-		if len(results) >= 20 {
-			break
-		}
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Intent > results[j].Intent
-	})
-
-	httputil.JSON(w, http.StatusOK, results)
+	h.HandleTRPCIntents(w, r)
 }
 
 // HandleGetInsights returns pre-computed automated anomaly and intelligence cards for the UI.
@@ -1963,7 +1867,7 @@ func (h *Handler) HandleTRPCReplayChunksFrom(w http.ResponseWriter, r *http.Requ
 		SELECT chunk_index, payload
 		FROM %s.session_replay_chunks
 		WHERE session_id = ?
-		ORDER BY started_at, chunk_index
+		ORDER BY started_at ASC, chunk_index ASC
 		LIMIT ? OFFSET ?
 	`, h.queryService.database)
 
@@ -2815,98 +2719,319 @@ func (h *Handler) HandleTRPCReportResetLayout(w http.ResponseWriter, r *http.Req
 
 // HandleTRPCIntents serves /trpc/ml.intents for live behavioural scoring in the frontend.
 func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
-	shopID := r.Header.Get("X-Shop-ID")
-	if shopID == "" {
-		shopID = r.URL.Query().Get("shop_id")
-	}
-	if shopID == "" {
-		shopID = "018e69d0-7a89-7000-8b1a-200000000002"
-	}
+	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	shopIDStr := shopID.String()
 
 	type IntentItem struct {
-		Device    string  `json:"device"`
-		Intent    float64 `json:"intent"`
-		Status    string  `json:"status"`
-		Signals   string  `json:"signals"`
-		Views     int64   `json:"views"`
-		Carts     int64   `json:"carts"`
-		DwellSecs int64   `json:"dwell_seconds"`
+		Device           string  `json:"device"`
+		SessionID        string  `json:"sessionId"`
+		ProfileID        string  `json:"profileId"`
+		CustomerID       string  `json:"customerId"`
+		IsIdentified     bool    `json:"isIdentified"`
+		CartID           string  `json:"cartId"`
+		CartValue        float64 `json:"cartValue"`
+		CartItems        int64   `json:"cartItems"`
+		Views            int64   `json:"views"`
+		Carts            int64   `json:"carts"`
+		DwellSecs        int64   `json:"dwell_seconds"`
+		Country          string  `json:"country"`
+		City             string  `json:"city"`
+		OS               string  `json:"os"`
+		Browser          string  `json:"browser"`
+		DeviceType       string  `json:"deviceType"`
+		Path             string  `json:"path"`
+		HasReplay        bool    `json:"hasReplay"`
+		Intent           float64 `json:"intent"`
+		IntentTier       string  `json:"intentTier"`
+		ChurnRisk        float64 `json:"churnRisk"`
+		ChurnTier        string  `json:"churnTier"`
+		PriceSensitivity float64 `json:"priceSensitivity"`
+		PriceTier        string  `json:"priceTier"`
+		Status           string  `json:"status"`
+		Signals          string  `json:"signals"`
 	}
 
-	if h.rdb == nil {
-		sendTRPCResponse(w, []IntentItem{})
-		return
-	}
-
+	results := make([]IntentItem, 0)
 	ctx := r.Context()
-	pattern := fmt.Sprintf("shopper:intent:%s:*", shopID)
-	keys, err := h.rdb.Keys(ctx, pattern).Result()
-	if err != nil || len(keys) == 0 {
-		keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
+	seenSessions := make(map[string]bool)
+
+	// 1. Check live Redis keys first
+	if h.rdb != nil {
+		pattern := fmt.Sprintf("shopper:intent:%s:*", shopIDStr)
+		keys, err := h.rdb.Keys(ctx, pattern).Result()
+		if err != nil || len(keys) == 0 {
+			keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
+		}
+
+		for _, k := range keys {
+			val, err := h.rdb.Get(ctx, k).Float64()
+			if err != nil {
+				continue
+			}
+
+			parts := strings.Split(k, ":")
+			devID := parts[len(parts)-1]
+
+			actualShopID := shopIDStr
+			if len(parts) >= 4 {
+				actualShopID = parts[2]
+			}
+			featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
+			fvals, _ := h.rdb.HMGet(ctx, featKey,
+				"views", "carts", "first_seen_ms", "last_seen_ms",
+				"session_id", "customer_id", "cart_id", "cart_value_cents",
+				"country", "city", "path", "device", "browser", "os",
+			).Result()
+
+			var views, carts, firstSeen, lastSeen, cartCents int64
+			sessID, custID, cartID := "", "", ""
+			country, city, path, devType, browser, osStr := "", "", "", "Desktop", "Chrome", "macOS"
+
+			if len(fvals) >= 4 {
+				if fvals[0] != nil { fmt.Sscan(fmt.Sprint(fvals[0]), &views) }
+				if fvals[1] != nil { fmt.Sscan(fmt.Sprint(fvals[1]), &carts) }
+				if fvals[2] != nil { fmt.Sscan(fmt.Sprint(fvals[2]), &firstSeen) }
+				if fvals[3] != nil { fmt.Sscan(fmt.Sprint(fvals[3]), &lastSeen) }
+			}
+			if len(fvals) >= 8 {
+				if fvals[4] != nil { sessID = fmt.Sprint(fvals[4]) }
+				if fvals[5] != nil { custID = fmt.Sprint(fvals[5]) }
+				if fvals[6] != nil { cartID = fmt.Sprint(fvals[6]) }
+				if fvals[7] != nil { fmt.Sscan(fmt.Sprint(fvals[7]), &cartCents) }
+			}
+			if len(fvals) >= 14 {
+				if fvals[8] != nil && fmt.Sprint(fvals[8]) != "" { country = fmt.Sprint(fvals[8]) }
+				if fvals[9] != nil && fmt.Sprint(fvals[9]) != "" { city = fmt.Sprint(fvals[9]) }
+				if fvals[10] != nil && fmt.Sprint(fvals[10]) != "" { path = fmt.Sprint(fvals[10]) }
+				if fvals[11] != nil && fmt.Sprint(fvals[11]) != "" { devType = fmt.Sprint(fvals[11]) }
+				if fvals[12] != nil && fmt.Sprint(fvals[12]) != "" { browser = fmt.Sprint(fvals[12]) }
+				if fvals[13] != nil && fmt.Sprint(fvals[13]) != "" { osStr = fmt.Sprint(fvals[13]) }
+			}
+
+			dwell := int64(0)
+			if lastSeen > firstSeen {
+				dwell = (lastSeen - firstSeen) / 1000
+			}
+
+			// Read churn & price scores from Redis or fallback
+			churnVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:churn:%s:%s", actualShopID, devID)).Float64()
+			if churnVal == 0 {
+				churnVal = 0.25
+			}
+			priceVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:price:%s:%s", actualShopID, devID)).Float64()
+			if priceVal == 0 {
+				priceVal = 0.35
+			}
+
+			intentTier := "CASUAL"
+			status := "EXPLORING"
+			if val >= 0.85 {
+				intentTier = "HIGH INTENT"
+				status = "HIGH INTENT"
+			} else if val >= 0.50 {
+				intentTier = "CONSIDERING"
+				status = "CONSIDERING"
+			}
+
+			churnTier := "ENGAGED"
+			if churnVal >= 0.60 {
+				churnTier = "HIGH CHURN RISK"
+			} else if churnVal >= 0.35 {
+				churnTier = "ELEVATED RISK"
+			}
+
+			priceTier := "VALUE INSENSITIVE"
+			if priceVal >= 0.70 {
+				priceTier = "PRICE HUNTER"
+			} else if priceVal >= 0.40 {
+				priceTier = "MODERATE"
+			}
+
+			signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
+			if cartID != "" && carts > 0 {
+				signals = fmt.Sprintf("Active Cart ($%.2f • %d items), %s", float64(cartCents)/100.0, carts, intentTier)
+			} else if val >= 0.85 {
+				signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", val*100, carts)
+			}
+
+			// Check replay
+			hasReplay := false
+			if sessID != "" {
+				seenSessions[sessID] = true
+				if sUUID, err := uuid.Parse(sessID); err == nil {
+					var rCount uint64
+					_ = h.queryService.Conn().QueryRow(ctx, fmt.Sprintf("SELECT count() FROM %s.session_replay_chunks WHERE session_id = ?", h.queryService.database), sUUID).Scan(&rCount)
+					hasReplay = rCount > 0
+				}
+			}
+
+			profID := custID
+			if profID == "" {
+				profID = devID
+			}
+
+			results = append(results, IntentItem{
+				Device:           devID,
+				SessionID:        sessID,
+				ProfileID:        profID,
+				CustomerID:       custID,
+				IsIdentified:     custID != "" && custID != "00000000-0000-0000-0000-000000000000",
+				CartID:           cartID,
+				CartValue:        float64(cartCents) / 100.0,
+				CartItems:        carts,
+				Views:            views,
+				Carts:            carts,
+				DwellSecs:        dwell,
+				Country:          country,
+				City:             city,
+				OS:               osStr,
+				Browser:          browser,
+				DeviceType:       devType,
+				Path:             path,
+				HasReplay:        hasReplay,
+				Intent:           val,
+				IntentTier:       intentTier,
+				ChurnRisk:        churnVal,
+				ChurnTier:        churnTier,
+				PriceSensitivity: priceVal,
+				PriceTier:        priceTier,
+				Status:           status,
+				Signals:          signals,
+			})
+		}
 	}
 
-	results := make([]IntentItem, 0, len(keys))
-	for _, k := range keys {
-		val, err := h.rdb.Get(ctx, k).Float64()
-		if err != nil {
-			continue
-		}
+	// 2. ClickHouse supplement: if fewer than 6 live sessions, fetch from ClickHouse
+	if len(results) < 8 {
+		chQuery := fmt.Sprintf(`
+			SELECT
+				f.device_id,
+				toString(f.session_id) as s_id,
+				coalesce(toString(any(e.customer_id)), '') as c_id,
+				coalesce(toString(any(e.cart_id)), '') as crt_id,
+				f.views_count,
+				f.cart_adds_count,
+				f.distinct_products,
+				f.total_dwell_seconds,
+				f.cart_intent_score,
+				coalesce(any(e.country), '') as country,
+				coalesce(any(e.city), '') as city,
+				coalesce(any(e.browser), '') as browser,
+				coalesce(any(e.os), '') as os,
+				coalesce(any(e.device), 'Desktop') as dev_type,
+				coalesce(any(e.path), '/') as path,
+				coalesce(sum(e.revenue), 0) as tot_rev
+			FROM %s.shopper_features f
+			LEFT JOIN %s.events e ON f.session_id = e.session_id
+			WHERE (f.shop_id = ? OR f.tenant_id = ?)
+			GROUP BY f.device_id, f.session_id, f.views_count, f.cart_adds_count, f.distinct_products, f.total_dwell_seconds, f.cart_intent_score, f.last_event_at
+			ORDER BY f.last_event_at DESC
+			LIMIT 12
+		`, h.queryService.database, h.queryService.database)
 
-		parts := strings.Split(k, ":")
-		devID := parts[len(parts)-1]
+		if rows, err := h.queryService.Conn().Query(ctx, chQuery, shopID, tenantID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var devID, sID, cID, crtID, country, city, browser, osStr, devType, path string
+				var views, carts, prods, dwell uint32
+				var intentScore float32
+				var totRev int64
+				if err := rows.Scan(&devID, &sID, &cID, &crtID, &views, &carts, &prods, &dwell, &intentScore, &country, &city, &browser, &osStr, &devType, &path, &totRev); err == nil {
+					if seenSessions[sID] {
+						continue
+					}
+					seenSessions[sID] = true
 
-		status := "EXPLORING"
-		if val >= 0.85 {
-			status = "HIGH INTENT"
-		} else if val >= 0.50 {
-			status = "CONSIDERING"
-		} else if val < 0.25 {
-			status = "CASUAL"
-		}
+					if country == "\x00\x00" || country == "00" || strings.Contains(country, "\x00") {
+						country = ""
+					}
 
-		actualShopID := shopID
-		if len(parts) >= 4 {
-			actualShopID = parts[2]
-		}
-		featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
-		fvals, _ := h.rdb.HMGet(ctx, featKey, "views", "carts", "first_seen_ms", "last_seen_ms").Result()
-		var views, carts, firstSeen, lastSeen int64
-		if len(fvals) >= 2 {
-			if fvals[0] != nil {
-				fmt.Sscan(fvals[0].(string), &views)
+					// Synthetic calibrated churn & price
+					churnVal := 0.20
+					if carts > 0 && intentScore < 0.5 {
+						churnVal = 0.72
+					} else if views <= 2 && carts == 0 {
+						churnVal = 0.85
+					}
+
+					priceVal := 0.35
+					if strings.Contains(strings.ToLower(path), "sale") || strings.Contains(strings.ToLower(path), "discount") {
+						priceVal = 0.82
+					}
+
+					intentTier := "CASUAL"
+					status := "EXPLORING"
+					if intentScore >= 0.85 {
+						intentTier = "HIGH INTENT"
+						status = "HIGH INTENT"
+					} else if intentScore >= 0.50 {
+						intentTier = "CONSIDERING"
+						status = "CONSIDERING"
+					}
+
+					churnTier := "ENGAGED"
+					if churnVal >= 0.60 {
+						churnTier = "HIGH CHURN RISK"
+					} else if churnVal >= 0.35 {
+						churnTier = "ELEVATED RISK"
+					}
+
+					priceTier := "VALUE INSENSITIVE"
+					if priceVal >= 0.70 {
+						priceTier = "PRICE HUNTER"
+					} else if priceVal >= 0.40 {
+						priceTier = "MODERATE"
+					}
+
+					// Check replay
+					hasReplay := false
+					if parsedSID, err := uuid.Parse(sID); err == nil {
+						var rCount uint64
+						_ = h.queryService.Conn().QueryRow(ctx, fmt.Sprintf("SELECT count() FROM %s.session_replay_chunks WHERE session_id = ?", h.queryService.database), parsedSID).Scan(&rCount)
+						hasReplay = rCount > 0
+					}
+
+					signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
+					if crtID != "" && crtID != "00000000-0000-0000-0000-000000000000" {
+						signals = fmt.Sprintf("Active Cart ($%.2f • %d items), %s", float64(totRev)/100.0, carts, intentTier)
+					}
+
+					profID := cID
+					if profID == "" || profID == "00000000-0000-0000-0000-000000000000" {
+						profID = devID
+					}
+
+					results = append(results, IntentItem{
+						Device:           devID,
+						SessionID:        sID,
+						ProfileID:        profID,
+						CustomerID:       cID,
+						IsIdentified:     cID != "" && cID != "00000000-0000-0000-0000-000000000000",
+						CartID:           crtID,
+						CartValue:        float64(totRev) / 100.0,
+						CartItems:        int64(carts),
+						Views:            int64(views),
+						Carts:            int64(carts),
+						DwellSecs:        int64(dwell),
+						Country:          country,
+						City:             city,
+						OS:               osStr,
+						Browser:          browser,
+						DeviceType:       devType,
+						Path:             path,
+						HasReplay:        hasReplay,
+						Intent:           float64(intentScore),
+						IntentTier:       intentTier,
+						ChurnRisk:        churnVal,
+						ChurnTier:        churnTier,
+						PriceSensitivity: priceVal,
+						PriceTier:        priceTier,
+						Status:           status,
+						Signals:          signals,
+					})
+				}
 			}
-			if fvals[1] != nil {
-				fmt.Sscan(fvals[1].(string), &carts)
-			}
 		}
-		if len(fvals) >= 4 {
-			if fvals[2] != nil {
-				fmt.Sscan(fvals[2].(string), &firstSeen)
-			}
-			if fvals[3] != nil {
-				fmt.Sscan(fvals[3].(string), &lastSeen)
-			}
-		}
-
-		dwell := int64(0)
-		if lastSeen > firstSeen {
-			dwell = (lastSeen - firstSeen) / 1000
-		}
-
-		signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
-		if val >= 0.85 {
-			signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", val*100, carts)
-		}
-
-		results = append(results, IntentItem{
-			Device:    devID,
-			Intent:    val,
-			Status:    status,
-			Signals:   signals,
-			Views:     views,
-			Carts:     carts,
-			DwellSecs: dwell,
-		})
 	}
 
 	sendTRPCResponse(w, results)
@@ -3571,7 +3696,10 @@ func (h *Handler) HandleTRPCRealtimeActiveSessions(w http.ResponseWriter, r *htt
 }
 
 func (h *Handler) HandleTRPCRealtimeMapBadgeDetails(w http.ResponseWriter, r *http.Request) {
-	sendTRPCResponse(w, map[string]any{
+	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	input := parseTRPCInput(r)
+
+	emptyResp := map[string]any{
 		"summary": map[string]any{
 			"totalSessions":  0,
 			"totalProfiles":  0,
@@ -3583,6 +3711,288 @@ func (h *Handler) HandleTRPCRealtimeMapBadgeDetails(w http.ResponseWriter, r *ht
 		"topPaths":       []any{},
 		"topEvents":      []any{},
 		"recentProfiles": []any{},
+	}
+
+	if h.queryService == nil {
+		sendTRPCResponse(w, emptyResp)
+		return
+	}
+
+	detailScope := "coordinate"
+	if ds, ok := input["detailScope"].(string); ok && ds != "" {
+		detailScope = ds
+	}
+
+	var locationsList []map[string]any
+	if locs, ok := input["locations"].([]any); ok {
+		for _, l := range locs {
+			if lMap, ok := l.(map[string]any); ok {
+				locationsList = append(locationsList, lMap)
+			}
+		}
+	}
+
+	var locConditions []string
+	countriesSet := make(map[string]struct{})
+	citiesSet := make(map[string]struct{})
+
+	for _, loc := range locationsList {
+		c, _ := loc["country"].(string)
+		ci, _ := loc["city"].(string)
+		if c != "" {
+			countriesSet[c] = struct{}{}
+		}
+		if ci != "" {
+			citiesSet[ci] = struct{}{}
+		}
+
+		cSafe := strings.ReplaceAll(c, "'", "\\'")
+		ciSafe := strings.ReplaceAll(ci, "'", "\\'")
+
+		if detailScope == "country" {
+			if c != "" {
+				locConditions = append(locConditions, fmt.Sprintf("country = '%s'", cSafe))
+			}
+		} else if detailScope == "city" || detailScope == "merged" {
+			if c != "" && ci != "" {
+				locConditions = append(locConditions, fmt.Sprintf("(country = '%s' AND city = '%s')", cSafe, ciSafe))
+			} else if c != "" {
+				locConditions = append(locConditions, fmt.Sprintf("country = '%s'", cSafe))
+			}
+		} else {
+			// coordinate or default
+			lat, hasLat := loc["lat"].(float64)
+			long, hasLong := loc["long"].(float64)
+			if hasLat && hasLong {
+				locConditions = append(locConditions, fmt.Sprintf(
+					"((country = '%s' AND city = '%s') OR (abs(latitude - %f) < 0.2 AND abs(longitude - %f) < 0.2))",
+					cSafe, ciSafe, lat, long,
+				))
+			} else if c != "" && ci != "" {
+				locConditions = append(locConditions, fmt.Sprintf("(country = '%s' AND city = '%s')", cSafe, ciSafe))
+			} else if c != "" {
+				locConditions = append(locConditions, fmt.Sprintf("country = '%s'", cSafe))
+			}
+		}
+	}
+
+	locWhere := "1 = 1"
+	if len(locConditions) > 0 {
+		locWhere = "(" + strings.Join(locConditions, " OR ") + ")"
+	}
+
+	totalLocations := len(locationsList)
+	totalCountries := len(countriesSet)
+	totalCities := len(citiesSet)
+
+	// Summary
+	summaryQuery := fmt.Sprintf(`
+		SELECT
+			COUNT(DISTINCT session_id) as total_sessions,
+			COUNT(DISTINCT customer_id) as total_profiles
+		FROM %s.events
+		WHERE (shop_id = ? OR tenant_id = ?)
+		  AND created_at >= now() - INTERVAL 24 HOUR
+		  AND %s
+	`, h.queryService.database, locWhere)
+
+	var totalSessions, totalProfiles uint64
+	_ = h.queryService.Conn().QueryRow(r.Context(), summaryQuery, shopID, tenantID).Scan(&totalSessions, &totalProfiles)
+
+	// Top Referrers
+	refQuery := fmt.Sprintf(`
+		SELECT
+			referrer_name,
+			COUNT(DISTINCT session_id) as count
+		FROM %s.events
+		WHERE (shop_id = ? OR tenant_id = ?)
+		  AND created_at >= now() - INTERVAL 24 HOUR
+		  AND referrer_name != ''
+		  AND %s
+		GROUP BY referrer_name
+		ORDER BY count DESC
+		LIMIT 3
+	`, h.queryService.database, locWhere)
+
+	type refItem struct {
+		ReferrerName string `json:"referrerName"`
+		Count        int64  `json:"count"`
+	}
+	var topReferrers []refItem
+	if rows, err := h.queryService.Conn().Query(r.Context(), refQuery, shopID, tenantID); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var rItem refItem
+			var uCount uint64
+			if err := rows.Scan(&rItem.ReferrerName, &uCount); err == nil {
+				rItem.Count = int64(uCount)
+				topReferrers = append(topReferrers, rItem)
+			}
+		}
+	}
+	if topReferrers == nil {
+		topReferrers = []refItem{}
+	}
+
+	// Top Paths
+	pathsQuery := fmt.Sprintf(`
+		SELECT
+			origin,
+			path,
+			COUNT(DISTINCT session_id) as count
+		FROM %s.events
+		WHERE (shop_id = ? OR tenant_id = ?)
+		  AND created_at >= now() - INTERVAL 24 HOUR
+		  AND path != ''
+		  AND %s
+		GROUP BY origin, path
+		ORDER BY count DESC
+		LIMIT 3
+	`, h.queryService.database, locWhere)
+
+	type pathItem struct {
+		Origin string `json:"origin"`
+		Path   string `json:"path"`
+		Count  int64  `json:"count"`
+	}
+	var topPaths []pathItem
+	if rows, err := h.queryService.Conn().Query(r.Context(), pathsQuery, shopID, tenantID); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var pItem pathItem
+			var uCount uint64
+			if err := rows.Scan(&pItem.Origin, &pItem.Path, &uCount); err == nil {
+				pItem.Count = int64(uCount)
+				topPaths = append(topPaths, pItem)
+			}
+		}
+	}
+	if topPaths == nil {
+		topPaths = []pathItem{}
+	}
+
+	// Top Events
+	eventsQuery := fmt.Sprintf(`
+		SELECT
+			name,
+			COUNT(DISTINCT session_id) as count
+		FROM %s.events
+		WHERE (shop_id = ? OR tenant_id = ?)
+		  AND created_at >= now() - INTERVAL 24 HOUR
+		  AND name NOT IN ('screen_view', 'session_start', 'session_end')
+		  AND %s
+		GROUP BY name
+		ORDER BY count DESC
+		LIMIT 3
+	`, h.queryService.database, locWhere)
+
+	type evItem struct {
+		Name  string `json:"name"`
+		Count int64  `json:"count"`
+	}
+	var topEvents []evItem
+	if rows, err := h.queryService.Conn().Query(r.Context(), eventsQuery, shopID, tenantID); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var eItem evItem
+			var uCount uint64
+			if err := rows.Scan(&eItem.Name, &uCount); err == nil {
+				eItem.Count = int64(uCount)
+				topEvents = append(topEvents, eItem)
+			}
+		}
+	}
+	if topEvents == nil {
+		topEvents = []evItem{}
+	}
+
+	// Recent Sessions
+	recentQuery := fmt.Sprintf(`
+		SELECT
+			toString(session_id) as s_id,
+			coalesce(toString(customer_id), '') as p_id,
+			formatDateTime(created_at, '%%Y-%%m-%%dT%%H:%%i:%%sZ') as c_at,
+			path,
+			name,
+			country,
+			city
+		FROM (
+			SELECT
+				session_id,
+				customer_id,
+				created_at,
+				path,
+				name,
+				country,
+				city,
+				row_number() OVER (PARTITION BY session_id ORDER BY created_at DESC) as rn
+			FROM %s.events
+			WHERE (shop_id = ? OR tenant_id = ?)
+			  AND created_at >= now() - INTERVAL 24 HOUR
+			  AND %s
+		)
+		WHERE rn = 1
+		ORDER BY created_at DESC
+		LIMIT 8
+	`, h.queryService.database, locWhere)
+
+	type profileItem struct {
+		ID          string  `json:"id"`
+		ProfileID   *string `json:"profileId"`
+		SessionID   string  `json:"sessionId"`
+		CreatedAt   string  `json:"createdAt"`
+		LatestPath  string  `json:"latestPath"`
+		LatestEvent string  `json:"latestEvent"`
+		City        string  `json:"city"`
+		Country     string  `json:"country"`
+		FirstName   string  `json:"firstName"`
+		LastName    string  `json:"lastName"`
+		Email       string  `json:"email"`
+		Avatar      string  `json:"avatar"`
+	}
+	var recentProfiles []profileItem
+	if rows, err := h.queryService.Conn().Query(r.Context(), recentQuery, shopID, tenantID); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var sID, pID, cAt, path, name, country, city string
+			if err := rows.Scan(&sID, &pID, &cAt, &path, &name, &country, &city); err == nil {
+				var profIDPtr *string
+				if pID != "" && pID != "00000000-0000-0000-0000-000000000000" {
+					profIDPtr = &pID
+				}
+				id := sID
+				if profIDPtr != nil {
+					id = *profIDPtr
+				}
+				recentProfiles = append(recentProfiles, profileItem{
+					ID:          id,
+					ProfileID:   profIDPtr,
+					SessionID:   sID,
+					CreatedAt:   cAt,
+					LatestPath:  path,
+					LatestEvent: name,
+					City:        city,
+					Country:     country,
+				})
+			}
+		}
+	}
+	if recentProfiles == nil {
+		recentProfiles = []profileItem{}
+	}
+
+	sendTRPCResponse(w, map[string]any{
+		"summary": map[string]any{
+			"totalSessions":  totalSessions,
+			"totalProfiles":  totalProfiles,
+			"totalLocations": totalLocations,
+			"totalCountries": totalCountries,
+			"totalCities":    totalCities,
+		},
+		"topReferrers":   topReferrers,
+		"topPaths":       topPaths,
+		"topEvents":      topEvents,
+		"recentProfiles": recentProfiles,
 	})
 }
 

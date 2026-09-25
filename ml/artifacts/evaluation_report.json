@@ -1,0 +1,28 @@
+{
+  "validation_samples": 2500,
+  "inference_latency_microseconds": 0.81,
+  "cart_intent_model": {
+    "accuracy": 0.7664,
+    "precision": 0.3437,
+    "recall": 0.9521,
+    "f1_score": 0.5051,
+    "confusion_matrix": {
+      "tp": 298,
+      "fp": 569,
+      "tn": 1618,
+      "fn": 15
+    }
+  },
+  "churn_predictor_model": {
+    "accuracy": 0.7428,
+    "precision": 1.0,
+    "recall": 0.5862,
+    "f1_score": 0.7391,
+    "confusion_matrix": {
+      "tp": 911,
+      "fp": 0,
+      "tn": 946,
+      "fn": 643
+    }
+  }
+}

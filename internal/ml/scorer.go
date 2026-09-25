@@ -10,10 +10,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/domain"
 )
+
+// GenericModelWeights defines the coefficients for behavioral logistic models.
+type GenericModelWeights struct {
+	Version      string             `json:"version"`
+	ModelType    string             `json:"model_type"`
+	Features     []string           `json:"features"`
+	Coefficients map[string]float64 `json:"coefficients"`
+	Thresholds   map[string]float64 `json:"thresholds"`
+}
 
 // IntentModelWeights defines the coefficients for the logistic regression / tree intent model.
 type IntentModelWeights struct {
@@ -28,11 +38,13 @@ type IntentModelWeights struct {
 	} `json:"thresholds"`
 }
 
-// Scorer evaluates real-time shopper purchase propensity from clickstream events.
+// Scorer evaluates real-time shopper purchase propensity, churn risk, and price sensitivity.
 type Scorer struct {
-	weights IntentModelWeights
-	rdb     *redis.Client
-	mu      sync.RWMutex
+	weights      IntentModelWeights
+	churnWeights GenericModelWeights
+	priceWeights GenericModelWeights
+	rdb          *redis.Client
+	mu           sync.RWMutex
 }
 
 // ShopperFeatures holds extracted session features.
@@ -45,7 +57,7 @@ type ShopperFeatures struct {
 
 // NewScorer loads model weights and initializes the inference engine.
 func NewScorer(modelPath string, rdb *redis.Client) (*Scorer, error) {
-	// Default calibrated weights
+	// Default calibrated weights for Intent
 	weights := IntentModelWeights{
 		Version:   "v1.0.0",
 		ModelType: "calibrated_logistic_intent",
@@ -61,27 +73,76 @@ func NewScorer(modelPath string, rdb *redis.Client) (*Scorer, error) {
 	weights.Thresholds.Medium = 0.65
 	weights.Thresholds.High = 0.85
 
+	// Default Churn weights
+	churnWeights := GenericModelWeights{
+		Version:   "v1.1.0",
+		ModelType: "calibrated_churn_risk",
+		Coefficients: map[string]float64{
+			"bias":               1.15,
+			"views_count":        -0.08,
+			"cart_adds_count":    -2.10,
+			"distinct_products":  0.05,
+			"dwell_time_seconds": -0.005,
+			"avg_scroll_depth":   -1.85,
+		},
+		Thresholds: map[string]float64{"low_risk": 0.3, "medium_risk": 0.6, "high_risk": 0.8},
+	}
+
+	// Default Price Sensitivity weights
+	priceWeights := GenericModelWeights{
+		Version:   "v1.1.0",
+		ModelType: "calibrated_price_sensitivity",
+		Coefficients: map[string]float64{
+			"bias":               -1.65,
+			"views_count":        0.05,
+			"sale_view_ratio":    3.85,
+			"distinct_products":  0.18,
+			"dwell_time_seconds": 0.002,
+			"cart_adds_count":    0.35,
+		},
+		Thresholds: map[string]float64{"low": 0.35, "moderate": 0.65, "price_hunter": 0.85},
+	}
+
 	// Try loading from JSON configuration if exists
 	jsonPath := modelPath
 	if len(jsonPath) > 5 && jsonPath[len(jsonPath)-5:] == ".onnx" {
 		jsonPath = jsonPath[:len(jsonPath)-5] + ".json"
 	}
 
-	data, err := os.ReadFile(jsonPath)
-	if err == nil {
+	if data, err := os.ReadFile(jsonPath); err == nil {
 		if err := json.Unmarshal(data, &weights); err != nil {
 			log.Printf("[ML Scorer] Warning: failed to parse weights from %s: %v, using defaults", jsonPath, err)
 		} else {
 			log.Printf("[ML Scorer] Loaded model weights version %s from %s", weights.Version, jsonPath)
 		}
 	} else {
-		// WEAK_POINT(fallback-model): Use built-in calibrated model coefficients when model file is not on disk.
 		log.Printf("[ML Scorer] Model file %s not found; using calibrated default weights", jsonPath)
 	}
 
+	// Try loading churn predictor
+	dir := ""
+	for i := len(jsonPath) - 1; i >= 0; i-- {
+		if jsonPath[i] == '/' || jsonPath[i] == '\\' {
+			dir = jsonPath[:i]
+			break
+		}
+	}
+	if dir != "" {
+		churnPath := dir + "/churn_predictor_v1.json"
+		if cData, err := os.ReadFile(churnPath); err == nil {
+			_ = json.Unmarshal(cData, &churnWeights)
+		}
+		pricePath := dir + "/price_sensitivity_v1.json"
+		if pData, err := os.ReadFile(pricePath); err == nil {
+			_ = json.Unmarshal(pData, &priceWeights)
+		}
+	}
+
 	return &Scorer{
-		weights: weights,
-		rdb:     rdb,
+		weights:      weights,
+		churnWeights: churnWeights,
+		priceWeights: priceWeights,
+		rdb:          rdb,
 	}, nil
 }
 
@@ -118,6 +179,37 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 		}
 	} else if event.Name == "add_to_cart" {
 		pipe.HIncrBy(ctx, featureKey, "carts", 1)
+	}
+
+	if event.SessionID != uuid.Nil {
+		pipe.HSet(ctx, featureKey, "session_id", event.SessionID.String())
+	}
+	if event.CustomerID != nil && *event.CustomerID != uuid.Nil {
+		pipe.HSet(ctx, featureKey, "customer_id", event.CustomerID.String())
+	}
+	if event.CartID != nil && *event.CartID != uuid.Nil {
+		pipe.HSet(ctx, featureKey, "cart_id", event.CartID.String())
+	}
+	if event.Revenue != nil {
+		pipe.HIncrBy(ctx, featureKey, "cart_value_cents", *event.Revenue)
+	}
+	if event.Country != "" {
+		pipe.HSet(ctx, featureKey, "country", event.Country)
+	}
+	if event.City != "" {
+		pipe.HSet(ctx, featureKey, "city", event.City)
+	}
+	if event.Path != "" {
+		pipe.HSet(ctx, featureKey, "path", event.Path)
+	}
+	if event.Device != "" {
+		pipe.HSet(ctx, featureKey, "device", event.Device)
+	}
+	if event.Browser != "" {
+		pipe.HSet(ctx, featureKey, "browser", event.Browser)
+	}
+	if event.OS != "" {
+		pipe.HSet(ctx, featureKey, "os", event.OS)
 	}
 
 	pipe.HSetNX(ctx, featureKey, "first_seen_ms", nowMs)
@@ -160,30 +252,57 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 		distinctProducts = scnt
 	}
 
-	// 3. Compute inference score: Sigmoid(z)
-	// CRITICAL(inference-latency): Linear/logistic model computation runs in < 50 nanoseconds in Go.
+	// 3. Compute multi-model inference scores: Sigmoid(z)
 	s.mu.RLock()
 	coefs := s.weights.Coefficients
-	z := coefs["bias"] +
+	zIntent := coefs["bias"] +
 		coefs["views_count"]*float64(views) +
 		coefs["cart_adds_count"]*float64(carts) +
 		coefs["distinct_products"]*float64(distinctProducts) +
 		coefs["dwell_time_seconds"]*float64(dwellSeconds)
 	highThreshold := s.weights.Thresholds.High
+
+	cCoefs := s.churnWeights.Coefficients
+	zChurn := cCoefs["bias"] +
+		cCoefs["views_count"]*float64(views) +
+		cCoefs["cart_adds_count"]*float64(carts) +
+		cCoefs["distinct_products"]*float64(distinctProducts) +
+		cCoefs["dwell_time_seconds"]*float64(dwellSeconds) +
+		cCoefs["avg_scroll_depth"]*0.70
+
+	pCoefs := s.priceWeights.Coefficients
+	zPrice := pCoefs["bias"] +
+		pCoefs["views_count"]*float64(views) +
+		pCoefs["sale_view_ratio"]*0.25 +
+		pCoefs["distinct_products"]*float64(distinctProducts) +
+		pCoefs["dwell_time_seconds"]*float64(dwellSeconds) +
+		pCoefs["cart_adds_count"]*float64(carts)
 	s.mu.RUnlock()
 
-	score := 1.0 / (1.0 + math.Exp(-z))
+	score := 1.0 / (1.0 + math.Exp(-zIntent))
+	churnScore := 1.0 / (1.0 + math.Exp(-zChurn))
+	priceScore := 1.0 / (1.0 + math.Exp(-zPrice))
 	isHighIntent := score >= highThreshold
 
-	// 4. Cache intent score in Redis for live marketing or checkout triggers
+	// 4. Cache scores in Redis for live marketing or checkout triggers
 	intentKey := fmt.Sprintf("shopper:intent:%s:%s", event.ShopID.String(), event.DeviceID)
-	_ = s.rdb.Set(ctx, intentKey, fmt.Sprintf("%.4f", score), 30*time.Minute).Err()
+	churnKey := fmt.Sprintf("shopper:churn:%s:%s", event.ShopID.String(), event.DeviceID)
+	priceKey := fmt.Sprintf("shopper:price:%s:%s", event.ShopID.String(), event.DeviceID)
+
+	scorePipe := s.rdb.Pipeline()
+	scorePipe.Set(ctx, intentKey, fmt.Sprintf("%.4f", score), 30*time.Minute)
+	scorePipe.Set(ctx, churnKey, fmt.Sprintf("%.4f", churnScore), 30*time.Minute)
+	scorePipe.Set(ctx, priceKey, fmt.Sprintf("%.4f", priceScore), 30*time.Minute)
 
 	if isHighIntent {
-		// CRITICAL(intent-trigger): Mark high-intent flag for active session
 		triggerKey := fmt.Sprintf("shopper:high_intent:%s:%s", event.ShopID.String(), event.DeviceID)
-		_ = s.rdb.Set(ctx, triggerKey, "1", 15*time.Minute).Err()
+		scorePipe.Set(ctx, triggerKey, "1", 15*time.Minute)
 	}
+	if churnScore >= 0.60 && carts > 0 {
+		abandonKey := fmt.Sprintf("shopper:abandon_risk:%s:%s", event.ShopID.String(), event.DeviceID)
+		scorePipe.Set(ctx, abandonKey, "1", 15*time.Minute)
+	}
+	_, _ = scorePipe.Exec(ctx)
 
 	hasPurchase := uint8(0)
 	if event.Name == "purchase" {

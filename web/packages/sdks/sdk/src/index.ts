@@ -76,10 +76,6 @@ export class OpenAnalytics {
 
     if (typeof window !== 'undefined' && typeof sessionStorage !== 'undefined') {
       try {
-        const storedSession = sessionStorage.getItem('oa_session_id');
-        if (storedSession) {
-          this.sessionId = storedSession;
-        }
         const storedDevice = sessionStorage.getItem('oa_device_id');
         if (storedDevice) {
           this.deviceId = storedDevice;
@@ -134,16 +130,36 @@ export class OpenAnalytics {
 
     // Disable keepalive for replay since large snapshot blobs break browser 64KB keepalive limit
     const endpoint = payload.type === 'replay' ? '/api/v1/replay' : '/api/v1/track';
-    const reqBody =
-      payload.type === 'replay'
-        ? {
-            ...payload.payload,
-            sessionId: (payload.payload as any).sessionId || this.sessionId,
-            session_id: (payload.payload as any).session_id || this.sessionId,
-            shopId: (payload.payload as any).shopId || this.options.clientId,
-            shop_id: (payload.payload as any).shop_id || this.options.clientId,
-          }
-        : payload;
+    let reqBody: any;
+    if (payload.type === 'replay') {
+      reqBody = {
+        ...payload.payload,
+        sessionId: (payload.payload as any).sessionId || this.sessionId,
+        session_id: (payload.payload as any).session_id || this.sessionId,
+        shopId: (payload.payload as any).shopId || this.options.clientId,
+        shop_id: (payload.payload as any).shop_id || this.options.clientId,
+      };
+    } else {
+      let storedSession: string | null = null;
+      if (typeof window !== 'undefined' && typeof sessionStorage !== 'undefined') {
+        try {
+          storedSession = sessionStorage.getItem('oa_session_id');
+        } catch {}
+      }
+      const activeSession = this.sessionId || storedSession;
+      reqBody = {
+        ...payload,
+        payload: {
+          ...(typeof payload.payload === 'object' ? payload.payload : {}),
+          ...(activeSession
+            ? { session_id: activeSession, sessionId: activeSession }
+            : {}),
+          ...(this.deviceId
+            ? { device_id: this.deviceId, deviceId: this.deviceId }
+            : {}),
+        },
+      };
+    }
 
     const result = await this.api.fetch<any, any>(endpoint, reqBody, {
       keepalive: payload.type !== 'replay',

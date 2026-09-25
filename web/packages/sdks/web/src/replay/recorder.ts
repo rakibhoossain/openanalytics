@@ -103,8 +103,41 @@ export function startReplayRecorder(
   const maskAllText = config.maskAllText !== false;
   const unmaskTextSelector = config.unmaskTextSelector;
 
+  function sanitizeSnapshotNode(node: any): void {
+    if (!node || typeof node !== 'object') return;
+    if (node.attributes && typeof node.attributes._cssText === 'string') {
+      const textChildren = Array.isArray(node.childNodes)
+        ? node.childNodes.filter(
+            (c: any) =>
+              c &&
+              c.type === 3 &&
+              typeof c.textContent === 'string' &&
+              c.textContent.trim().length > 0,
+          )
+        : [];
+      const elementChildren = Array.isArray(node.childNodes)
+        ? node.childNodes.filter((c: any) => c && c.type === 2)
+        : [];
+      if (elementChildren.length > 0 || textChildren.length === 0) {
+        node.childNodes = [];
+      }
+    }
+    if (Array.isArray(node.childNodes)) {
+      for (const child of node.childNodes) {
+        sanitizeSnapshotNode(child);
+      }
+    }
+  }
+
   const stopFn = record({
     emit(event: eventWithTime, isCheckout?: boolean) {
+      if (event.type === 2 && (event as any).data?.node) {
+        sanitizeSnapshotNode((event as any).data.node);
+      } else if (event.type === 3 && Array.isArray((event as any).data?.adds)) {
+        for (const add of (event as any).data.adds) {
+          if (add?.node) sanitizeSnapshotNode(add.node);
+        }
+      }
       buffer.push(event);
       if (event.type === 2 && chunkIndex === 0) {
         setTimeout(() => {
@@ -128,6 +161,9 @@ export function startReplayRecorder(
     blockSelector: config.blockSelector ?? '[data-oa-block]',
     blockClass: config.blockClass,
     ignoreSelector: config.ignoreSelector,
+    inlineStylesheet: true,
+    collectFonts: true,
+    recordAfter: 'DOMContentLoaded',
   });
 
   flushTimer = setInterval(() => {
