@@ -73,6 +73,19 @@ export class OpenAnalytics {
       baseUrl: options.apiUrl || 'http://localhost:8080',
       defaultHeaders,
     });
+
+    if (typeof window !== 'undefined' && typeof sessionStorage !== 'undefined') {
+      try {
+        const storedSession = sessionStorage.getItem('oa_session_id');
+        if (storedSession) {
+          this.sessionId = storedSession;
+        }
+        const storedDevice = sessionStorage.getItem('oa_device_id');
+        if (storedDevice) {
+          this.deviceId = storedDevice;
+        }
+      } catch {}
+    }
   }
 
   init() {
@@ -121,18 +134,46 @@ export class OpenAnalytics {
 
     // Disable keepalive for replay since large snapshot blobs break browser 64KB keepalive limit
     const endpoint = payload.type === 'replay' ? '/api/v1/replay' : '/api/v1/track';
-    const result = await this.api.fetch<
-      any,
-      { deviceId?: string; sessionId?: string; session_id?: string; event_id?: string }
-    >(endpoint, payload.type === 'replay' ? payload.payload : payload, { keepalive: payload.type !== 'replay' });
+    const reqBody =
+      payload.type === 'replay'
+        ? {
+            ...payload.payload,
+            sessionId: (payload.payload as any).sessionId || this.sessionId,
+            session_id: (payload.payload as any).session_id || this.sessionId,
+            shopId: (payload.payload as any).shopId || this.options.clientId,
+            shop_id: (payload.payload as any).shop_id || this.options.clientId,
+          }
+        : payload;
 
-    if (result?.deviceId) {
-      this.deviceId = result.deviceId;
+    const result = await this.api.fetch<any, any>(endpoint, reqBody, {
+      keepalive: payload.type !== 'replay',
+    });
+
+    const respData =
+      result && typeof result === 'object' && 'data' in result && result.data
+        ? result.data
+        : result;
+    const returnedDevice =
+      respData?.deviceId || respData?.device_id || result?.deviceId || result?.device_id;
+    const returnedSession =
+      respData?.sessionId || respData?.session_id || result?.sessionId || result?.session_id;
+
+    if (returnedDevice) {
+      this.deviceId = returnedDevice;
+      if (typeof window !== 'undefined' && typeof sessionStorage !== 'undefined') {
+        try {
+          sessionStorage.setItem('oa_device_id', returnedDevice);
+        } catch {}
+      }
     }
-    const returnedSession = result?.sessionId || result?.session_id;
     const hadSession = !!this.sessionId;
     if (returnedSession) {
       this.sessionId = returnedSession;
+      if (typeof window !== 'undefined' && typeof sessionStorage !== 'undefined') {
+        try {
+          sessionStorage.setItem('oa_session_id', returnedSession);
+        } catch {}
+      }
     }
 
     // Flush queued items (such as buffered replay chunks) when sessionId arrives
@@ -278,7 +319,10 @@ export class OpenAnalytics {
       return {
         ...item.payload,
         sessionId: this.sessionId,
-      };
+        session_id: this.sessionId,
+        shopId: this.options.clientId,
+        shop_id: this.options.clientId,
+      } as any;
     }
     if (item.type === 'track') {
       const queuedGroups =

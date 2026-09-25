@@ -38,7 +38,7 @@ export function startReplayRecorder(
   }
 
   const maxEventsPerChunk = config.maxEventsPerChunk ?? 200;
-  const flushIntervalMs = config.flushIntervalMs ?? 10_000;
+  const flushIntervalMs = config.flushIntervalMs ?? 5_000;
   const maxPayloadBytes = config.maxPayloadBytes ?? 1_048_576; // 1MB
 
   let buffer: eventWithTime[] = [];
@@ -106,7 +106,15 @@ export function startReplayRecorder(
   const stopFn = record({
     emit(event: eventWithTime, isCheckout?: boolean) {
       buffer.push(event);
-      flushIfNeeded(!!isCheckout);
+      if (event.type === 2 && chunkIndex === 0) {
+        setTimeout(() => {
+          if (buffer.length > 0 && chunkIndex === 0) {
+            flush(true);
+          }
+        }, 300);
+      } else {
+        flushIfNeeded(!!isCheckout);
+      }
     },
     checkoutEveryNms: flushIntervalMs,
     maskAllInputs: config.maskAllInputs ?? true,

@@ -3,13 +3,15 @@ import { NextResponse } from 'next/server.js';
 
 type RouteHandlerOptions = {
   apiUrl?: string;
+  tenantId?: string;
+  shopId?: string;
 };
 
 const DEFAULT_API_URL = 'http://127.0.0.1:8080';
 const SCRIPT_URL = 'http://127.0.0.1:8080';
 const SCRIPT_PATH = '/oa.js';
 
-function getClientHeaders(req: Request): Headers {
+function getClientHeaders(req: Request, options?: RouteHandlerOptions): Headers {
   const headers = new Headers();
   const ip =
     req.headers.get('cf-connecting-ip') ??
@@ -23,11 +25,15 @@ function getClientHeaders(req: Request): Headers {
     req.headers.get('openpanel-client-id') ??
     req.headers.get('openanalytics-client-id') ??
     req.headers.get('x-shop-id') ??
+    options?.shopId ??
     '';
-  headers.set('openpanel-client-id', clientId);
-  headers.set('X-Shop-Id', clientId);
+  if (clientId) {
+    headers.set('openpanel-client-id', clientId);
+    headers.set('X-Shop-Id', clientId);
+    headers.set('openanalytics-client-id', clientId);
+  }
 
-  const tenantId = req.headers.get('x-tenant-id');
+  const tenantId = req.headers.get('x-tenant-id') ?? options?.tenantId;
   if (tenantId) {
     headers.set('X-Tenant-Id', tenantId);
   }
@@ -56,8 +62,9 @@ async function handleApiRoute(
   req: Request,
   apiUrl: string,
   apiPath: string,
+  options?: RouteHandlerOptions,
 ): Promise<NextResponse> {
-  const headers = getClientHeaders(req);
+  const headers = getClientHeaders(req, options);
 
   try {
     const res = await fetch(`${apiUrl}${apiPath}`, {
@@ -138,11 +145,11 @@ function createRouteHandler(options?: RouteHandlerOptions) {
     if (pathname.includes('/track')) {
       const apiPathMatch = pathname.indexOf('/track');
       const apiPath = '/api/v1' + pathname.substring(apiPathMatch);
-      return handleApiRoute(req, apiUrl, apiPath);
+      return handleApiRoute(req, apiUrl, apiPath, options);
     }
 
     if (pathname.includes('/replay')) {
-      return handleApiRoute(req, apiUrl, '/api/v1/replay');
+      return handleApiRoute(req, apiUrl, '/api/v1/replay', options);
     }
 
     return NextResponse.json({ error: 'Not found' }, { status: 404 });

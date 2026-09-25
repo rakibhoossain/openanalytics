@@ -77,6 +77,7 @@ func (ft *FlexibleTimestamp) Time() time.Time {
 type TrackRequest struct {
 	TenantID   string `json:"tenant_id,omitempty"`
 	ShopID     string `json:"shop_id,omitempty"`
+	ClientID   string `json:"client_id,omitempty"`
 	Name       string `json:"name"`
 	DeviceID   string `json:"device_id,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
@@ -107,10 +108,13 @@ type BatchTrackRequest struct {
 
 // TrackResponse is returned on successful event ingestion.
 type TrackResponse struct {
-	EventID   string `json:"event_id"`
-	DeviceID  string `json:"device_id"`
-	SessionID string `json:"session_id,omitempty"`
-	Status    string `json:"status"`
+	EventID      string `json:"event_id"`
+	AltEventID   string `json:"eventId,omitempty"`
+	DeviceID     string `json:"device_id"`
+	AltDeviceID  string `json:"deviceId,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	AltSessionID string `json:"sessionId,omitempty"`
+	Status       string `json:"status"`
 }
 
 // DeviceIDResponse is returned by GET /track/device-id.
@@ -134,11 +138,11 @@ type ReplayChunkPayload struct {
 	AltEventsCount uint16 `json:"eventsCount"`
 	IsFullSnapshot bool   `json:"is_full_snapshot"`
 	AltSnapshot    bool   `json:"isFullSnapshot"`
-	StartedAt      string `json:"started_at"`
-	AltStartedAt   string `json:"startedAt"`
-	EndedAt        string `json:"ended_at"`
-	AltEndedAt     string `json:"endedAt"`
-	Payload        string `json:"payload"`
+	StartedAt      *FlexibleTimestamp `json:"started_at,omitempty"`
+	AltStartedAt   *FlexibleTimestamp `json:"startedAt,omitempty"`
+	EndedAt        *FlexibleTimestamp `json:"ended_at,omitempty"`
+	AltEndedAt     *FlexibleTimestamp `json:"endedAt,omitempty"`
+	Payload        string             `json:"payload"`
 }
 
 // ReplayResponse is returned on successful replay chunk ingestion.

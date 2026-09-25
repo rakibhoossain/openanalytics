@@ -157,7 +157,10 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 	sessionKey := fmt.Sprintf("session:%s:%s", event.ShopID.String(), event.DeviceID)
 	wallclockKey := fmt.Sprintf("session:wallclock:%s", event.ShopID.String())
 	shopsKey := "session:shops"
-	newSessionID := uuidv7.MustNew().String()
+	newSessionID := event.SessionID.String()
+	if event.SessionID == uuid.Nil {
+		newSessionID = uuidv7.MustNew().String()
+	}
 	eventTimeMs := event.CreatedAt.UnixMilli()
 	timeoutMs := m.sessionTimeout.Milliseconds()
 

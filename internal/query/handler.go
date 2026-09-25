@@ -1982,7 +1982,7 @@ func (h *Handler) HandleTRPCReplayChunksFrom(w http.ResponseWriter, r *http.Requ
 		Events     []any `json:"events"`
 	}
 
-	var allChunks []chunkItem
+	allChunks := []chunkItem{}
 	for rows.Next() {
 		var chunkIdx uint16
 		var payloadStr string
