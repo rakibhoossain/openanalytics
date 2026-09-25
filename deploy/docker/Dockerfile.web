@@ -1,0 +1,40 @@
+# ==============================================================================
+# OpenAnalytics Web Dashboard (TanStack Start / React 19 / Vite)
+# Multi-stage production build
+# ==============================================================================
+
+# Build Stage
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# Copy root workspace and package files
+COPY web/package.json web/pnpm-lock.yaml* ./
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile
+
+# Copy web source code
+COPY web .
+
+# Build production bundle
+RUN pnpm build
+
+# Runtime Stage
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3000
+
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+# Copy production artifacts
+COPY --from=builder /app ./
+
+EXPOSE 3000
+
+CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "3000"]

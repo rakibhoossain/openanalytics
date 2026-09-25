@@ -1,0 +1,122 @@
+version: '3.8'
+
+services:
+  # ==============================================================================
+  # 1. OLAP Storage Engine: ClickHouse
+  # ==============================================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: op_clickhouse
+    restart: unless-stopped
+    ports:
+      - "8123:8123" # HTTP API
+      - "9000:9000" # Native TCP
+    environment:
+      CLICKHOUSE_DB: openpanel
+      CLICKHOUSE_USER: openpanel
+      CLICKHOUSE_PASSWORD: openpanel
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - ch_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==============================================================================
+  # 2. Ephemeral State & Cache: Redis
+  # ==============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: op_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==============================================================================
+  # 3. GeoIP Database Auto-Updater
+  # ==============================================================================
+  geoipupdate:
+    image: ghcr.io/maxmind/geoipupdate:v7
+    container_name: op_geoipupdate
+    restart: unless-stopped
+    environment:
+      GEOIPUPDATE_ACCOUNT_ID: ${GEOIPUPDATE_ACCOUNT_ID:-1234}
+      GEOIPUPDATE_LICENSE_KEY: ${GEOIPUPDATE_LICENSE_KEY:-your_license_key}
+      GEOIPUPDATE_EDITION_IDS: "GeoLite2-City GeoLite2-ASN"
+      GEOIPUPDATE_FREQUENCY: "168" # Update every 7 days
+    volumes:
+      - geo_data:/usr/share/GeoIP
+
+  # ==============================================================================
+  # 4. OpenAnalytics Unified Backend (Go-Chi)
+  # ==============================================================================
+  openanalytics:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.unified
+    container_name: op_backend
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080" # Ingest API
+      - "8081:8081" # Query & Admin API
+      - "9090:9090" # Prometheus Metrics
+    environment:
+      ENV: production
+      LOG_LEVEL: info
+      INGEST_PORT: 8080
+      QUERY_PORT: 8081
+      METRICS_PORT: 9090
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: openpanel
+      CLICKHOUSE_USERNAME: openpanel
+      CLICKHOUSE_PASSWORD: openpanel
+      REDIS_ADDR: redis:6379
+      REDIS_SESSION_TTL_MINUTES: 30
+      GEOIP_DATA_DIR: /usr/share/GeoIP
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+      ML_INFERENCE_ENABLED: "true"
+      DEV_DEFAULT_COUNTRY: ${DEV_DEFAULT_COUNTRY:-US}
+    volumes:
+      - geo_data:/usr/share/GeoIP:ro
+      - ../data/models:/app/data/models:ro
+
+  # ==============================================================================
+  # 5. OpenAnalytics Web Dashboard (TanStack / Vite)
+  # ==============================================================================
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.web
+    container_name: op_web
+    restart: unless-stopped
+    depends_on:
+      - openanalytics
+    ports:
+      - "3000:3000"
+    environment:
+      VITE_API_URL: http://openanalytics:8081
+
+volumes:
+  ch_data:
+  redis_data:
+  geo_data:

@@ -1,0 +1,52 @@
+# ==============================================================================
+# OpenAnalytics Unified Go Data Plane (Ingest, Worker, Query, ML Scorer)
+# Multi-stage Docker build for minimal footprint and maximum security
+# ==============================================================================
+
+# Build Stage
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Cache Go modules
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Compile optimized static binary with embedded optimizations
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath \
+    -ldflags="-w -s -X main.version=1.0.0" \
+    -o /bin/openanalytics ./cmd/all/main.go
+
+# Production Runtime Stage
+FROM alpine:3.20
+
+WORKDIR /app
+
+# Install runtime security & networking certificates
+RUN apk add --no-cache ca-certificates tzdata curl && \
+    addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
+
+# Copy compiled binary from builder
+COPY --from=builder /bin/openanalytics /app/openanalytics
+
+# Copy default model weights and assets
+COPY --chown=appuser:appgroup data /app/data
+
+# Use non-root user
+USER appuser
+
+# Expose Ingest (8080), Query/UI (8081), Metrics (9090)
+EXPOSE 8080 8081 9090
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8081/health || exit 1
+
+ENTRYPOINT ["/app/openanalytics"]
