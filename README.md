@@ -52,33 +52,101 @@ OpenAnalytics delivers high-volume event ingestion, streaming session management
 
 ---
 
-## 1. Behavioral Machine Learning Engine (`openanalytics/ml`)
+## 1. Real-Time Behavioral Machine Learning Subsystem (`openanalytics/ml`)
 
-### Is this Industry Standard for Tech Interviews & CVs?
-**Yes — it follows the exact Dual-Plane / Lambda ML Architecture used by companies like Uber (Michelangelo), DoorDash, Stripe, and Shopify.**
+OpenAnalytics features a production-grade, dual-plane machine learning system specifically engineered for low-latency e-commerce conversion intelligence, session bounce mitigation, and margin-preserving dynamic discounting.
 
-Most candidate ML projects are static Jupyter Notebooks that stop at `model.fit()` on a Kaggle CSV. In production engineering, the hard problem is **low-latency serving, feature stores, and online inference**. OpenAnalytics solves this directly:
+### Dual-Plane (Lambda) Architecture
 
-1. **Two-Tier (Dual-Plane) Architecture**:
-   - **Offline Plane (Python)**: Handles batch feature extraction from ClickHouse, historical dataset generation across behavioral archetypes, model training via Scikit-Learn/LightGBM, ROC-AUC calibration, and export to ONNX and JSON weights.
-   - **Online Plane (Go)**: Eliminates Python HTTP network serialization overhead by compiling weights into an in-process, zero-allocation Go scoring engine (`internal/ml/scorer.go`) that queries Redis feature vectors in **< 50 nanoseconds**.
-2. **Multi-Model Triad**:
-   - **Cart Intent (`cart_intent_v1`)**: Predicts probability of checkout completion ($P(\text{buy})$) using dwell time, catalog scatter, and cart velocity.
-   - **Churn Risk (`churn_predictor_v1`)**: Detects high-friction hesitation pauses and bounce risk ($P(\text{churn})$) before the customer leaves.
-   - **Price Sensitivity (`price_sensitivity_v1`)**: Isolates bargain hunters from high-AOV impulse buyers ($P(\text{discount})$) to deploy coupons selectively and prevent margin loss.
-3. **Local Explainability (SHAP-Style Feature Attribution)**:
-   - Provides per-shopper signal breakdowns explaining *why* a customer was classified as high-intent or churn-risk (e.g. `+1.95 cart additions`, `+0.0035 dwell`, `-0.15 scatter`).
-4. **Direct Business ROI**:
-   - Drives real-time e-commerce triggers: dynamic exit-intent popovers, 1-click checkout acceleration, and inventory priority.
+Real-time telemetry streams cannot tolerate the 10–25ms network hop, Python Global Interpreter Lock (GIL) contention, or JSON serialization overhead of calling external Python inference microservices for every clickstream event. 
 
-### How to Feature This on Your Resume / CV
-```markdown
-**Lead / Senior Software & ML Engineer — OpenAnalytics**
-- Designed and built a high-throughput multi-tenant analytics and behavioral ML platform processing 50,000+ events/sec using Go, ClickHouse, Kafka, and Redis.
-- Implemented a dual-plane ML architecture: trained multi-model behavioral classifiers (Purchase Intent, Churn Risk, Price Sensitivity) in Python/LightGBM, exporting to ONNX and calibrated weights for sub-50ns in-process Go inference.
-- Engineered a real-time Redis online feature store with sliding-window aggregations (dwell time, cart velocity, catalog scatter) feeding a live shopper radar dashboard via WebSockets.
-- Built an end-to-end Session Replay pipeline capturing DOM mutation chunks via rrweb, compressing and streaming payloads via ClickHouse native columnar blocks.
+OpenAnalytics solves this with a **Dual-Plane Architecture**:
+
 ```
+ ┌────────────────────────────────────────────────────────────────────────┐
+ │                      OFFLINE TRAINING PLANE (Python)                   │
+ │                                                                        │
+ │  ClickHouse OLAP ──► Feature ETL ──► LightGBM / Scikit ──► Model Eval  │
+ │  (Historical Events)  (pipeline/)     (training/)          (ROC-AUC)   │
+ │                                                                 │      │
+ │                                           ┌─────────────────────┴───┐  │
+ │                                           ▼                         ▼  │
+ │                                     ONNX Portable             JSON Weights
+ └───────────────────────────────────────────┼─────────────────────────┼──┘
+                                             │                         │
+ ┌───────────────────────────────────────────┼─────────────────────────┼──┐
+ │                      ONLINE INFERENCE PLANE (Golang)                │  │
+ │                                           ▼                         ▼  │
+ │  Kafka Event ──► Stream Worker ──► Redis Feature Store ──► In-Process  │
+ │  Stream          (Consumer Group)  (shopper:feat:...)      Go Scorer   │
+ │                                                            (< 50ns)    │
+ │                                                                 │      │
+ │                                                                 ▼      │
+ │                                                        Live Radar & UI │
+ └────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Offline Training Plane (Python / Scikit-Learn / LightGBM)**:
+   - Reads historical customer journeys from ClickHouse (`openpanel.events` and `openpanel.shopper_features`).
+   - Normalizes 15+ behavioral metrics, applies logarithmic scaling, and fits calibrated linear and tree models.
+   - Evaluates performance using ROC-AUC, Log-Loss, and Precision-Recall curves.
+   - Serializes trained weights into portable **ONNX graphs** (`.onnx`) and calibrated **zero-dependency coefficient tables** (`.json`).
+
+2. **Online Feature Store (Redis)**:
+   - Maintains real-time sliding-window shopper state under `shopper:feat:{shopId}:{deviceId}`.
+   - Atomic Redis Lua operations accumulate views, cart additions, unique product counts, dwell times, and cart totals with automatic 30-minute session TTLs.
+
+3. **Online Inference Plane (In-Process Go Scorer)**:
+   - Embedded directly within the Go stream worker (`internal/ml/scorer.go`).
+   - Evaluates shopper feature vectors using vectorized SIMD-friendly dot products and fast logistic sigmoids:
+     $$\sigma(z) = \frac{1}{1 + e^{-z}}$$
+   - Executes in **under 50 nanoseconds with zero heap allocations**, allowing a single Go worker node to score over **100,000 events/second in real time**.
+
+---
+
+### The Triad of Behavioral Propensity Models
+
+OpenAnalytics runs three specialized behavioral models simultaneously on every active shopper:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                COMPOSITE BEHAVIORAL SCORER                                  │
+├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
+│ 1. Cart Intent (P_buy)       │ 2. Churn Risk (P_churn)      │ 3. Price Sensitivity (P_disc) │
+│ Propensity to complete order │ Probability of session bounce│ Bargain-hunter vs AOV buyer   │
+└──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
+```
+
+#### 1. Purchase Intent Model (`cart_intent_v1`)
+- **Objective**: Accurately predict whether the active session will convert into a paid order before checkout.
+- **Key Inputs**: Cart additions, cart velocity, product views, total dwell time, and catalog dispersion.
+- **Formulation**:
+  $$z_{\text{intent}} = w_{\text{carts}} \cdot x_{\text{carts}} + w_{\text{dwell}} \cdot \ln(1 + x_{\text{dwell}}) - w_{\text{scatter}} \cdot x_{\text{scatter}} + b$$
+- **Business Trigger**: Shoppers scoring $\ge 85\%$ trigger 1-click checkout acceleration and inventory reservations.
+
+#### 2. Session Churn & Bounce Hazard (`churn_predictor_v1`)
+- **Objective**: Identify immediate drop-off and cart abandonment risk before the visitor navigates away.
+- **Key Inputs**: Zero scroll depth, hesitation pauses, catalog fatigue, and stagnant dwell with unpurchased items.
+- **Formulation**:
+  $$z_{\text{churn}} = b_{\text{churn}} - w_{c} \cdot x_{\text{carts}} - w_{s} \cdot x_{\text{scroll}} + w_{\text{hesitation}} \cdot x_{\text{idle}}$$
+- **Business Trigger**: Active carts with churn risk $\ge 60\%$ automatically trigger exit-intent recovery or shipping incentives.
+
+#### 3. Price Sensitivity & Bargain Affinity (`price_sensitivity_v1`)
+- **Objective**: Segment price-sensitive coupon hunters from high-AOV impulse buyers to prevent margin erosion.
+- **Key Inputs**: Sale collection views, promo dwell duration, price sort toggles, and coupon interaction events.
+- **Formulation**:
+  $$z_{\text{price}} = w_{\text{sale}} \cdot x_{\text{sale\_dwell}} + w_{\text{coupon}} \cdot x_{\text{coupon\_views}} - b_{\text{price}}$$
+- **Business Trigger**: Dynamic promotional discounts are deployed selectively only to price-sensitive shoppers, preserving full retail margins on high-intent buyers.
+
+---
+
+### Local Explainability Engine (SHAP-Style Feature Attribution)
+
+Black-box scores lack operational clarity. The OpenAnalytics ML engine decomposes each score into granular, human-readable signal attributions in real time:
+
+- $\Delta z_i = w_i \cdot x_i$: Identifies the exact positive or negative contribution of each customer action.
+- Serves localized signals directly to the UI Radar (e.g. `+1.95 cart additions`, `+0.0035 dwell/s`, `-0.15 catalog scatter`).
+- Powers automated merchant recommendations in the live dashboard inspector.
 
 ---
 
