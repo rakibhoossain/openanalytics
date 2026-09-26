@@ -207,7 +207,7 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	enrichedProps := applyBotVerdict(flatProps, botVerdict)
 
 	// Enrich with standard GA4/GTM items, CAPI user data, and deduplication event_id
-	enrichCommerceProperties(enrichedProps, &req, eventID)
+	enrichCommerceProperties(enrichedProps, &req, eventID, clientIP, uaStr)
 
 	var eventUUID uuid.UUID
 	if eventID != "" {
@@ -384,7 +384,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 		refInfo := referrer.Parse(req.Referrer)
 		enrichedProps := applyBotVerdict(itemFlatProps, itemBotVerdict)
-		enrichCommerceProperties(enrichedProps, &req, eventID)
+		enrichCommerceProperties(enrichedProps, &req, eventID, eventIP, eventUA)
 
 		var eventUUID uuid.UUID
 		if eventID != "" {
@@ -891,7 +891,13 @@ func normalizeTrackRequest(req *TrackRequest, flatProps map[string]string) strin
 }
 
 // enrichCommerceProperties formats items, user_data, and event_id into ClickHouse string properties.
-func enrichCommerceProperties(enrichedProps map[string]string, req *TrackRequest, eventID string) {
+func enrichCommerceProperties(enrichedProps map[string]string, req *TrackRequest, eventID, clientIP, uaStr string) {
+	if clientIP != "" {
+		enrichedProps["client_ip"] = clientIP
+	}
+	if uaStr != "" {
+		enrichedProps["client_ua"] = uaStr
+	}
 	// E-commerce items serialization into properties
 	if len(req.Items) > 0 {
 		if itemsJSON, err := json.Marshal(req.Items); err == nil {
