@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -21,6 +22,7 @@ import (
 	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/ingest"
+	"openanalytics/internal/integrations/meta"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/ml"
 	"openanalytics/internal/query"
@@ -103,6 +105,19 @@ func main() {
 	}
 
 	// ------------------------------------------------------------------
+	// 2b. Initialize Meta Conversions API (CAPI) Integration Engine
+	// ------------------------------------------------------------------
+	var chConn driver.Conn
+	if chWriter != nil {
+		chConn = chWriter.Conn()
+	}
+	metaRepo := meta.NewRepository(chConn, rdb)
+	metaClient := meta.NewClient("")
+	metaService := meta.NewService(ctx, metaRepo, metaClient)
+	defer metaService.Close()
+	log.Println("[Meta CAPI] Direct Conversions API forwarder service active")
+
+	// ------------------------------------------------------------------
 	// 3. Start Ingestion Engine (:8080)
 	// ------------------------------------------------------------------
 	ingestHandler := ingest.NewHandler(ingest.Config{
@@ -112,6 +127,9 @@ func main() {
 		Salt:        "aicart_openanalytics_salt",
 		CHWriter:    chWriter,
 		SessionMgr:  sessionMgr,
+		OnEvent: func(event *domain.Event) {
+			metaService.DispatchAsync(event)
+		},
 	})
 
 	ingestRouter := chi.NewRouter()
@@ -179,7 +197,7 @@ func main() {
 	wsHub := query.NewWebSocketHub(rdb, qs)
 	wsHub.Start(ctx)
 
-	queryHandler := query.NewHandler(qs).WithRedis(rdb).WithWSHub(wsHub)
+	queryHandler := query.NewHandler(qs).WithRedis(rdb).WithWSHub(wsHub).WithMetaIntegration(metaRepo, metaClient)
 
 	// ------------------------------------------------------------------
 	// 5. Start Stream Worker (Kafka Partition Consumer)

@@ -12,12 +12,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
+	"openanalytics/internal/integrations/meta"
 	"openanalytics/pkg/httputil"
 	"openanalytics/pkg/uuidv7"
 )
@@ -27,6 +29,8 @@ type Handler struct {
 	queryService *Service
 	rdb          *redis.Client
 	wsHub        *WebSocketHub
+	metaRepo     *meta.Repository
+	metaClient   *meta.Client
 }
 
 // NewHandler creates a new Query HTTP Handler.
@@ -45,6 +49,13 @@ func (h *Handler) WithRedis(rdb *redis.Client) *Handler {
 // WithWSHub attaches a WebSocketHub for live client event streaming.
 func (h *Handler) WithWSHub(hub *WebSocketHub) *Handler {
 	h.wsHub = hub
+	return h
+}
+
+// WithMetaIntegration attaches Meta CAPI repository and client dependencies.
+func (h *Handler) WithMetaIntegration(repo *meta.Repository, client *meta.Client) *Handler {
+	h.metaRepo = repo
+	h.metaClient = client
 	return h
 }
 
@@ -118,6 +129,13 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		// Reports
 		r.Get("/reports", h.HandleListReports)
 		r.Post("/reports", h.HandleCreateReport)
+
+		// 3rd-Party Integrations (Meta Conversions API)
+		r.Route("/integrations", func(r chi.Router) {
+			r.Get("/meta", h.HandleGetMetaIntegration)
+			r.Post("/meta", h.HandleSaveMetaIntegration)
+			r.Post("/meta/test", h.HandleTestMetaIntegration)
+		})
 	})
 
 	// tRPC Gateway for ported OpenPanel UI
@@ -4067,5 +4085,280 @@ func (h *Handler) HandleTRPCInsightList(w http.ResponseWriter, r *http.Request) 
 		resp = []map[string]any{}
 	}
 	sendTRPCResponse(w, resp)
+}
+
+// ==============================================================================
+// Meta Conversions API (CAPI) Integration Handlers
+// ==============================================================================
+
+func (h *Handler) getMetaRepo() *meta.Repository {
+	if h.metaRepo != nil {
+		return h.metaRepo
+	}
+	var conn driver.Conn
+	if h.queryService != nil {
+		conn = h.queryService.Conn()
+	}
+	h.metaRepo = meta.NewRepository(conn, h.rdb)
+	return h.metaRepo
+}
+
+func (h *Handler) getMetaClient() *meta.Client {
+	if h.metaClient != nil {
+		return h.metaClient
+	}
+	h.metaClient = meta.NewClient("")
+	return h.metaClient
+}
+
+// HandleGetMetaIntegration handles GET /api/v1/integrations/meta?shop_id={shopId}
+func (h *Handler) HandleGetMetaIntegration(w http.ResponseWriter, r *http.Request) {
+	shopIDStr := r.URL.Query().Get("shop_id")
+	if shopIDStr == "" {
+		shopIDStr = r.URL.Query().Get("shopId")
+	}
+	if shopIDStr == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id query parameter is required")
+		return
+	}
+	shopID, err := uuid.Parse(shopIDStr)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Invalid shop_id UUID: "+err.Error())
+		return
+	}
+
+	repo := h.getMetaRepo()
+	integration, err := repo.GetMetaIntegration(r.Context(), shopID)
+	if err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "DB_ERROR", "Failed to retrieve integration: "+err.Error())
+		return
+	}
+
+	if integration == nil {
+		httputil.JSON(w, http.StatusOK, map[string]interface{}{
+			"enabled":          false,
+			"pixel_id":         "",
+			"has_access_token": false,
+			"masked_token":     "",
+			"test_event_code":  "",
+			"events_whitelist": []string{"PageView", "ViewContent", "AddToCart", "InitiateCheckout", "Purchase"},
+		})
+		return
+	}
+
+	maskedToken := ""
+	hasToken := false
+	if integration.Credentials.AccessToken != "" {
+		hasToken = true
+		maskedToken = maskMetaToken(integration.Credentials.AccessToken)
+	}
+
+	whitelist := integration.EventsWhitelist
+	if len(whitelist) == 0 {
+		whitelist = []string{"PageView", "ViewContent", "AddToCart", "InitiateCheckout", "Purchase"}
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]interface{}{
+		"shop_id":          integration.ShopID,
+		"tenant_id":        integration.TenantID,
+		"enabled":          integration.Enabled,
+		"pixel_id":         integration.Credentials.PixelID,
+		"has_access_token": hasToken,
+		"masked_token":     maskedToken,
+		"test_event_code":  integration.Credentials.TestEventCode,
+		"events_whitelist": whitelist,
+		"updated_at":       integration.UpdatedAt,
+	})
+}
+
+// HandleSaveMetaIntegration handles POST /api/v1/integrations/meta
+func (h *Handler) HandleSaveMetaIntegration(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		ShopID          string   `json:"shop_id"`
+		TenantID        string   `json:"tenant_id"`
+		Enabled         *bool    `json:"enabled"`
+		PixelID         string   `json:"pixel_id"`
+		AccessToken     string   `json:"access_token"`
+		TestEventCode   string   `json:"test_event_code"`
+		EventsWhitelist []string `json:"events_whitelist"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse body: "+err.Error())
+		return
+	}
+
+	if payload.ShopID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id is required")
+		return
+	}
+	shopID, err := uuid.Parse(payload.ShopID)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Invalid shop_id UUID: "+err.Error())
+		return
+	}
+
+	var tenantID uuid.UUID
+	if payload.TenantID != "" {
+		if tid, err := uuid.Parse(payload.TenantID); err == nil {
+			tenantID = tid
+		}
+	}
+
+	repo := h.getMetaRepo()
+	existing, _ := repo.GetMetaIntegration(r.Context(), shopID)
+
+	enabled := true
+	if payload.Enabled != nil {
+		enabled = *payload.Enabled
+	} else if existing != nil {
+		enabled = existing.Enabled
+	}
+
+	accessToken := strings.TrimSpace(payload.AccessToken)
+	// If incoming token is empty or masked, keep existing token
+	if (accessToken == "" || strings.Contains(accessToken, "***")) && existing != nil {
+		accessToken = existing.Credentials.AccessToken
+	}
+
+	pixelID := strings.TrimSpace(payload.PixelID)
+	if pixelID == "" && existing != nil {
+		pixelID = existing.Credentials.PixelID
+	}
+
+	testEventCode := strings.TrimSpace(payload.TestEventCode)
+
+	whitelist := payload.EventsWhitelist
+	if len(whitelist) == 0 && existing != nil && len(existing.EventsWhitelist) > 0 {
+		whitelist = existing.EventsWhitelist
+	}
+
+	item := &meta.ShopIntegration{
+		ShopID:   shopID,
+		TenantID: tenantID,
+		Provider: meta.ProviderMetaCAPI,
+		Enabled:  enabled,
+		Credentials: meta.MetaCredentials{
+			PixelID:       pixelID,
+			AccessToken:   accessToken,
+			TestEventCode: testEventCode,
+		},
+		EventsWhitelist: whitelist,
+	}
+
+	if err := repo.SaveMetaIntegration(r.Context(), item); err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "SAVE_FAILED", "Failed to save Meta CAPI integration: "+err.Error())
+		return
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Meta Conversions API integration updated successfully",
+	})
+}
+
+// HandleTestMetaIntegration handles POST /api/v1/integrations/meta/test
+func (h *Handler) HandleTestMetaIntegration(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		ShopID        string `json:"shop_id"`
+		PixelID       string `json:"pixel_id"`
+		AccessToken   string `json:"access_token"`
+		TestEventCode string `json:"test_event_code"`
+		EventName     string `json:"event_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse body: "+err.Error())
+		return
+	}
+
+	pixelID := strings.TrimSpace(payload.PixelID)
+	accessToken := strings.TrimSpace(payload.AccessToken)
+	testEventCode := strings.TrimSpace(payload.TestEventCode)
+
+	repo := h.getMetaRepo()
+	if payload.ShopID != "" {
+		if shopUUID, err := uuid.Parse(payload.ShopID); err == nil {
+			if existing, _ := repo.GetMetaIntegration(r.Context(), shopUUID); existing != nil {
+				if pixelID == "" {
+					pixelID = existing.Credentials.PixelID
+				}
+				if accessToken == "" || strings.Contains(accessToken, "***") {
+					accessToken = existing.Credentials.AccessToken
+				}
+				if testEventCode == "" {
+					testEventCode = existing.Credentials.TestEventCode
+				}
+			}
+		}
+	}
+
+	if pixelID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_PIXEL_ID", "Meta Pixel ID is required")
+		return
+	}
+	if accessToken == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_ACCESS_TOKEN", "Meta Access Token is required")
+		return
+	}
+
+	eventName := payload.EventName
+	if eventName == "" {
+		eventName = "PageView"
+	}
+
+	testEvent := meta.CAPIEvent{
+		EventName:      eventName,
+		EventTime:      time.Now().Unix(),
+		EventID:        fmt.Sprintf("test_%d", time.Now().UnixNano()),
+		EventSourceURL: "https://openanalytics.io/test",
+		ActionSource:   "website",
+		UserData: meta.CAPIUserData{
+			EM:              []string{meta.NormalizeEmail("test-buyer@openanalytics.io")},
+			ClientIPAddress: "127.0.0.1",
+			ClientUserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+		},
+		CustomData: &meta.CAPICustomData{
+			Value:       29.99,
+			Currency:    "USD",
+			ContentType: "product",
+			ContentIDs:  []string{"test_sku_1"},
+			Contents: []meta.CAPIContentItem{
+				{
+					ID:        "test_sku_1",
+					Quantity:  1,
+					ItemPrice: 29.99,
+					Title:     "Test Product",
+				},
+			},
+		},
+	}
+
+	client := h.getMetaClient()
+	resp, err := client.SendEvents(r.Context(), pixelID, accessToken, testEventCode, []meta.CAPIEvent{testEvent})
+	if err != nil {
+		httputil.JSON(w, http.StatusOK, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+			"details": resp,
+		})
+		return
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]interface{}{
+		"success":         true,
+		"events_received": resp.EventsReceived,
+		"fbtrace_id":      resp.FBTraceID,
+		"messages":        resp.Messages,
+	})
+}
+
+func maskMetaToken(token string) string {
+	if len(token) <= 8 {
+		return "********"
+	}
+	prefix := token[:4]
+	suffix := token[len(token)-4:]
+	return prefix + strings.Repeat("*", 16) + suffix
 }
 

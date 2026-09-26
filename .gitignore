@@ -33,3 +33,4 @@ Thumbs.db
 openanalytics.log
 server.log
 /ml/training/__pycache__
+/ui/assets

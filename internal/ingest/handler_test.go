@@ -169,3 +169,92 @@ func TestCrawlerBypass(t *testing.T) {
 		}
 	}
 }
+
+func TestGA4AndMetaCAPIEventIngestion(t *testing.T) {
+	handler := NewHandler(Config{Salt: "test_salt"})
+	shopID := uuid.Must(uuid.NewV7())
+
+	t.Run("GA4 Purchase with items, value, and CAPI user_data", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"shop_id":        shopID.String(),
+			"event":          "purchase",
+			"event_id":       "evt_purchase_9988",
+			"value":          49.99,
+			"currency":       "USD",
+			"transaction_id": "ord_9988",
+			"items": []map[string]interface{}{
+				{
+					"item_id":       "sku_black_hoodie",
+					"item_name":     "Premium Heavyweight Hoodie",
+					"price":         49.99,
+					"quantity":      1,
+					"item_category": "Apparel",
+				},
+			},
+			"user_data": map[string]interface{}{
+				"email":             "buyer@example.com",
+				"phone":             "+15551234567",
+				"fbp":               "fb.1.1680000000.12345678",
+				"fbc":               "fb.1.1680000000.AbCdEfGh",
+				"client_ip_address": "8.8.8.8",
+				"client_user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+			},
+		}
+
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// Server Action sends from internal edge IP and fetch user-agent:
+		req.Header.Set("X-Forwarded-For", "10.0.0.1")
+		req.Header.Set("User-Agent", "node-fetch/3.0.0")
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status 202 Accepted, got %d: %s", w.Code, w.Body.String())
+		}
+
+		var resp struct {
+			Success bool          `json:"success"`
+			Data    TrackResponse `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+
+		if resp.Data.EventID == "" {
+			t.Errorf("expected non-empty event_id in response")
+		}
+	})
+
+	t.Run("GTM dataLayer envelope with ecommerce object", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"shop_id": shopID.String(),
+			"event":   "add_to_cart",
+			"ecommerce": map[string]interface{}{
+				"currency": "EUR",
+				"value":    29.50,
+				"items": []map[string]interface{}{
+					{
+						"item_id":   "sku_tee_white",
+						"item_name": "Organic Tee",
+						"price":     29.50,
+						"quantity":  1,
+					},
+				},
+			},
+		}
+
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status 202 Accepted, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}

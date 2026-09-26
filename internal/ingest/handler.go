@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -36,6 +37,7 @@ type Handler struct {
 	salt        string
 	chWriter    *clickhouse.BatchWriter
 	sessionMgr  *session.Manager
+	onEvent     func(event *domain.Event)
 }
 
 // Config holds dependencies for Handler.
@@ -46,6 +48,7 @@ type Config struct {
 	Salt        string
 	CHWriter    *clickhouse.BatchWriter
 	SessionMgr  *session.Manager
+	OnEvent     func(event *domain.Event)
 }
 
 // NewHandler creates a new Ingestion Handler.
@@ -62,6 +65,7 @@ func NewHandler(cfg Config) *Handler {
 		salt:        salt,
 		chWriter:    cfg.CHWriter,
 		sessionMgr:  cfg.SessionMgr,
+		onEvent:     cfg.OnEvent,
 	}
 }
 
@@ -104,6 +108,10 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Name == "" && req.Event != "" {
+		req.Name = req.Event
+	}
+
 	if req.Name == "" {
 		httputil.Error(w, http.StatusBadRequest, "MISSING_NAME", "Event name is required")
 		return
@@ -116,17 +124,28 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenantID := h.resolveTenantID(r, &req)
+
+	// Resolve end-shopper Client IP:
+	// Prioritize server-action forwarded IP overrides (UserData.ClientIPAddress or req.IP)
+	// over direct TCP proxy remote address.
 	clientIP := h.extractClientIP(r)
 	if req.IP != "" {
 		clientIP = req.IP
+	} else if req.UserData != nil && req.UserData.ClientIPAddress != "" {
+		clientIP = req.UserData.ClientIPAddress
 	}
+
+	// Resolve end-shopper User-Agent:
+	// Prioritize server-action forwarded User-Agent over direct TCP proxy header.
 	uaStr := r.Header.Get("User-Agent")
 	if req.UserAgent != "" {
 		uaStr = req.UserAgent
+	} else if req.UserData != nil && req.UserData.ClientUserAgent != "" {
+		uaStr = req.UserData.ClientUserAgent
 	}
 	uaRes := uaparser.ParseRequest(r)
-	if req.UserAgent != "" {
-		uaRes = uaparser.Parse(req.UserAgent)
+	if uaStr != r.Header.Get("User-Agent") {
+		uaRes = uaparser.Parse(uaStr)
 	}
 
 	deviceID := req.DeviceID
@@ -166,32 +185,8 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	// Flatten and normalize properties (supports OpenPanel toDots format)
 	flatProps := FlattenProperties(req.Properties)
 
-	// Fallback to __path, __referrer, __revenue if missing from top-level request
-	if req.Path == "" {
-		if p, ok := flatProps["__path"]; ok && p != "" {
-			req.Path = p
-		} else if p, ok := flatProps["path"]; ok && p != "" {
-			req.Path = p
-		}
-	}
-	if req.Referrer == "" {
-		if ref, ok := flatProps["__referrer"]; ok && ref != "" {
-			req.Referrer = ref
-		} else if ref, ok := flatProps["referrer"]; ok && ref != "" {
-			req.Referrer = ref
-		}
-	}
-	if req.Revenue == nil {
-		if revStr, ok := flatProps["__revenue"]; ok && revStr != "" {
-			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
-				req.Revenue = &v
-			}
-		} else if revStr, ok := flatProps["revenue"]; ok && revStr != "" {
-			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
-				req.Revenue = &v
-			}
-		}
-	}
+	// Normalize GA4/GTM ecommerce payload, value to cents, order_id, and deduplication event_id
+	eventID := normalizeTrackRequest(&req, flatProps)
 
 	sessionID := h.resolveSessionID(r.Context(), shopID, deviceID, &req)
 	timestamp := h.resolveTimestamp(req.Timestamp)
@@ -211,8 +206,22 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	botVerdict := detectBotSuspicion(r, asnInfo, uaRes)
 	enrichedProps := applyBotVerdict(flatProps, botVerdict)
 
+	// Enrich with standard GA4/GTM items, CAPI user data, and deduplication event_id
+	enrichCommerceProperties(enrichedProps, &req, eventID)
+
+	var eventUUID uuid.UUID
+	if eventID != "" {
+		if parsedUUID, err := uuid.Parse(eventID); err == nil {
+			eventUUID = parsedUUID
+		} else {
+			eventUUID = uuidv7.MustNew()
+		}
+	} else {
+		eventUUID = uuidv7.MustNew()
+	}
+
 	event := &domain.Event{
-		ID:           uuidv7.MustNew(),
+		ID:           eventUUID,
 		TenantID:     tenantID,
 		ShopID:       shopID,
 		Name:         req.Name,
@@ -268,6 +277,10 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if h.onEvent != nil {
+		h.onEvent(event)
+	}
+
 	httputil.JSON(w, http.StatusAccepted, TrackResponse{
 		EventID:      event.ID.String(),
 		AltEventID:   event.ID.String(),
@@ -315,6 +328,13 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		if req.Name == "" && req.Event != "" {
+			req.Name = req.Event
+		}
+		if req.Name == "" {
+			continue
+		}
+
 		shopID, err := h.resolveShopID(r, &req)
 		if err != nil {
 			continue
@@ -323,45 +343,23 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		eventIP := clientIP
 		if req.IP != "" {
 			eventIP = req.IP
+		} else if req.UserData != nil && req.UserData.ClientIPAddress != "" {
+			eventIP = req.UserData.ClientIPAddress
 		}
 		eventUA := uaStr
 		if req.UserAgent != "" {
 			eventUA = req.UserAgent
+		} else if req.UserData != nil && req.UserData.ClientUserAgent != "" {
+			eventUA = req.UserData.ClientUserAgent
 		}
 		itemUARes := uaRes
-		if req.UserAgent != "" {
+		if eventUA != uaStr {
 			itemUARes = uaparser.Parse(eventUA)
 		}
 
 		// Flatten and normalize properties (supports OpenPanel toDots format)
 		itemFlatProps := FlattenProperties(req.Properties)
-
-		// Fallback to __path, __referrer, __revenue if missing from top-level request
-		if req.Path == "" {
-			if p, ok := itemFlatProps["__path"]; ok && p != "" {
-				req.Path = p
-			} else if p, ok := itemFlatProps["path"]; ok && p != "" {
-				req.Path = p
-			}
-		}
-		if req.Referrer == "" {
-			if ref, ok := itemFlatProps["__referrer"]; ok && ref != "" {
-				req.Referrer = ref
-			} else if ref, ok := itemFlatProps["referrer"]; ok && ref != "" {
-				req.Referrer = ref
-			}
-		}
-		if req.Revenue == nil {
-			if revStr, ok := itemFlatProps["__revenue"]; ok && revStr != "" {
-				if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
-					req.Revenue = &v
-				}
-			} else if revStr, ok := itemFlatProps["revenue"]; ok && revStr != "" {
-				if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
-					req.Revenue = &v
-				}
-			}
-		}
+		eventID := normalizeTrackRequest(&req, itemFlatProps)
 
 		tenantID := h.resolveTenantID(r, &req)
 		deviceID := req.DeviceID
@@ -374,21 +372,33 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 		itemLoc := loc
 		itemASN := asnInfo
-		if req.IP != "" && h.geoService != nil {
+		if (req.IP != "" || (req.UserData != nil && req.UserData.ClientIPAddress != "")) && h.geoService != nil {
 			itemLoc, _ = h.geoService.Lookup(eventIP)
 			itemASN, _ = h.geoService.LookupASN(eventIP)
 		}
 
 		itemBotVerdict := botVerdict
-		if req.IP != "" || req.UserAgent != "" {
+		if req.IP != "" || req.UserAgent != "" || req.UserData != nil {
 			itemBotVerdict = detectBotSuspicion(r, itemASN, itemUARes)
 		}
 
 		refInfo := referrer.Parse(req.Referrer)
 		enrichedProps := applyBotVerdict(itemFlatProps, itemBotVerdict)
+		enrichCommerceProperties(enrichedProps, &req, eventID)
+
+		var eventUUID uuid.UUID
+		if eventID != "" {
+			if parsedUUID, err := uuid.Parse(eventID); err == nil {
+				eventUUID = parsedUUID
+			} else {
+				eventUUID = uuidv7.MustNew()
+			}
+		} else {
+			eventUUID = uuidv7.MustNew()
+		}
 
 		event := &domain.Event{
-			ID:           uuidv7.MustNew(),
+			ID:           eventUUID,
 			TenantID:     tenantID,
 			ShopID:       shopID,
 			Name:         req.Name,
@@ -448,6 +458,12 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			} else {
 				_ = h.chWriter.AddEvent(r.Context(), ev)
 			}
+		}
+	}
+
+	if h.onEvent != nil {
+		for _, ev := range events {
+			h.onEvent(ev)
 		}
 	}
 
@@ -782,5 +798,140 @@ func parseTimestampString(s string) time.Time {
 		}
 	}
 	return time.Now().UTC()
+}
+
+// normalizeTrackRequest normalizes GA4/GTM ecommerce payloads, decimal values to integer cents,
+// and extracts the deduplication event ID.
+func normalizeTrackRequest(req *TrackRequest, flatProps map[string]string) string {
+	// GA4/GTM standard event name alias
+	if req.Name == "" && req.Event != "" {
+		req.Name = req.Event
+	}
+
+	// Meta CAPI deduplication event_id
+	eventID := req.EventID
+	if eventID == "" {
+		eventID = req.AltEventID
+	}
+	if eventID == "" {
+		if eid, ok := flatProps["event_id"]; ok && eid != "" {
+			eventID = eid
+		} else if eid, ok := flatProps["eventId"]; ok && eid != "" {
+			eventID = eid
+		}
+	}
+
+	// Unpack GTM dataLayer 'ecommerce' object if provided
+	if req.Ecommerce != nil {
+		if rawItems, ok := req.Ecommerce["items"].([]interface{}); ok && len(req.Items) == 0 {
+			if itemsBytes, err := json.Marshal(rawItems); err == nil {
+				_ = json.Unmarshal(itemsBytes, &req.Items)
+			}
+		}
+		if req.Value == nil {
+			if val, ok := req.Ecommerce["value"].(float64); ok {
+				req.Value = &val
+			}
+		}
+		if req.Currency == "" {
+			if cur, ok := req.Ecommerce["currency"].(string); ok {
+				req.Currency = cur
+			}
+		}
+		if req.TransactionID == "" {
+			if tid, ok := req.Ecommerce["transaction_id"].(string); ok {
+				req.TransactionID = tid
+			}
+		}
+	}
+
+	// Fallback to __path, __referrer, __revenue if missing from top-level request
+	if req.Path == "" {
+		if p, ok := flatProps["__path"]; ok && p != "" {
+			req.Path = p
+		} else if p, ok := flatProps["path"]; ok && p != "" {
+			req.Path = p
+		}
+	}
+	if req.Referrer == "" {
+		if ref, ok := flatProps["__referrer"]; ok && ref != "" {
+			req.Referrer = ref
+		} else if ref, ok := flatProps["referrer"]; ok && ref != "" {
+			req.Referrer = ref
+		}
+	}
+	if req.Revenue == nil {
+		if revStr, ok := flatProps["__revenue"]; ok && revStr != "" {
+			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+				req.Revenue = &v
+			}
+		} else if revStr, ok := flatProps["revenue"]; ok && revStr != "" {
+			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+				req.Revenue = &v
+			}
+		} else if req.Value != nil {
+			revCents := int64(math.Round(*req.Value * 100))
+			req.Revenue = &revCents
+		} else if valStr, ok := flatProps["value"]; ok && valStr != "" {
+			if vf, err := strconv.ParseFloat(valStr, 64); err == nil {
+				revCents := int64(math.Round(vf * 100))
+				req.Revenue = &revCents
+			}
+		}
+	}
+
+	if req.OrderID == "" && req.TransactionID != "" {
+		req.OrderID = req.TransactionID
+	}
+	if req.TransactionID == "" && req.OrderID != "" {
+		req.TransactionID = req.OrderID
+	}
+
+	return eventID
+}
+
+// enrichCommerceProperties formats items, user_data, and event_id into ClickHouse string properties.
+func enrichCommerceProperties(enrichedProps map[string]string, req *TrackRequest, eventID string) {
+	// E-commerce items serialization into properties
+	if len(req.Items) > 0 {
+		if itemsJSON, err := json.Marshal(req.Items); err == nil {
+			enrichedProps["items"] = string(itemsJSON)
+		}
+		enrichedProps["items_count"] = strconv.Itoa(len(req.Items))
+		if req.Items[0].ItemID != "" {
+			enrichedProps["item_id"] = req.Items[0].ItemID
+		}
+		if req.Items[0].ItemName != "" {
+			enrichedProps["item_name"] = req.Items[0].ItemName
+		}
+	}
+
+	// Meta CAPI deduplication event_id
+	if eventID != "" {
+		enrichedProps["event_id"] = eventID
+	}
+
+	// Meta CAPI user data preservation
+	if req.UserData != nil {
+		if req.UserData.Fbp != "" {
+			enrichedProps["fbp"] = req.UserData.Fbp
+		}
+		if req.UserData.Fbc != "" {
+			enrichedProps["fbc"] = req.UserData.Fbc
+		}
+		if req.UserData.Email != "" {
+			enrichedProps["email_provided"] = "1"
+		}
+		if req.UserData.Phone != "" {
+			enrichedProps["phone_provided"] = "1"
+		}
+		if udJSON, err := json.Marshal(req.UserData); err == nil {
+			enrichedProps["_user_data"] = string(udJSON)
+		}
+	}
+
+	if req.TransactionID != "" {
+		enrichedProps["transaction_id"] = req.TransactionID
+	}
 }
 

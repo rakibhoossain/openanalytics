@@ -14,6 +14,7 @@ import {
   LayersIcon,
   LayoutDashboardIcon,
   LayoutPanelTopIcon,
+  PlugIcon,
   PlusIcon,
   SearchIcon,
   SparklesIcon,
@@ -72,6 +73,7 @@ export default function SidebarProjectMenu({
       <SidebarLink href={'/events'} icon={GanttChartIcon} label="Events" />
       <SidebarLink href={'/sessions'} icon={UsersIcon} label="Sessions" />
       <SidebarLink href={'/profiles'} icon={UserCircleIcon} label="Profiles" />
+      <SidebarLink href={'/integrations'} icon={PlugIcon} label="Integrations" />
       <SidebarLink href={'..'} icon={UndoDotIcon} label="Back to workspace" />
     </>
   );

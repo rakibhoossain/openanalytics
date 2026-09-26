@@ -73,30 +73,70 @@ func (ft *FlexibleTimestamp) Time() time.Time {
 	return time.Time(*ft)
 }
 
+// UserData represents high-match-quality customer identity parameters for Meta CAPI and Google Enhanced Conversions.
+type UserData struct {
+	Email           string `json:"email,omitempty"`
+	Phone           string `json:"phone,omitempty"`
+	FirstName       string `json:"first_name,omitempty"`
+	LastName        string `json:"last_name,omitempty"`
+	City            string `json:"city,omitempty"`
+	State           string `json:"state,omitempty"`
+	ZipCode         string `json:"zip_code,omitempty"`
+	CountryCode     string `json:"country_code,omitempty"`
+	ExternalID      string `json:"external_id,omitempty"`
+	Fbp             string `json:"fbp,omitempty"`             // _fbp browser cookie
+	Fbc             string `json:"fbc,omitempty"`             // _fbc click ID cookie
+	ClientIPAddress string `json:"client_ip_address,omitempty"`
+	ClientUserAgent string `json:"client_user_agent,omitempty"`
+}
+
+// ECommerceItem represents a single product item conforming to GA4 & GTM standards.
+type ECommerceItem struct {
+	ItemID        string   `json:"item_id"`
+	ItemName      string   `json:"item_name,omitempty"`
+	Price         *float64 `json:"price,omitempty"`          // Unit price in decimal currency (e.g. 29.99)
+	PriceCents    *int64   `json:"price_cents,omitempty"`    // Unit price in integer cents (e.g. 2999)
+	Quantity      *int64   `json:"quantity,omitempty"`
+	Category      string   `json:"category,omitempty"`
+	ItemCategory  string   `json:"item_category,omitempty"`
+	ItemCategory2 string   `json:"item_category2,omitempty"`
+	ItemBrand     string   `json:"item_brand,omitempty"`
+	ItemVariant   string   `json:"item_variant,omitempty"`
+	Coupon        string   `json:"coupon,omitempty"`
+}
+
 // TrackRequest represents an incoming telemetry tracking payload.
 type TrackRequest struct {
 	TenantID   string `json:"tenant_id,omitempty"`
 	ShopID     string `json:"shop_id,omitempty"`
 	ClientID   string `json:"client_id,omitempty"`
 	Name       string `json:"name"`
+	Event      string `json:"event,omitempty"`       // GA4/GTM standard event name alias (e.g. "purchase", "add_to_cart")
+	EventID    string `json:"event_id,omitempty"`    // Meta CAPI deduplication ID
+	AltEventID string `json:"eventId,omitempty"`
 	DeviceID   string `json:"device_id,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	CustomerID string `json:"customer_id,omitempty"`
 
 	// E-Commerce telemetry (Revenue in integer cents, e.g. 100 = $1.00, 178 = $1.78, 14999 = $149.99)
-	Revenue   *int64 `json:"revenue,omitempty"`
-	Currency  string   `json:"currency,omitempty"`
-	ProductID string   `json:"product_id,omitempty"`
-	CartID    string   `json:"cart_id,omitempty"`
-	OrderID   string   `json:"order_id,omitempty"`
+	Revenue       *int64                 `json:"revenue,omitempty"`
+	Value         *float64               `json:"value,omitempty"`         // GA4 standard decimal value (e.g. 29.99)
+	Currency      string                 `json:"currency,omitempty"`
+	ProductID     string                 `json:"product_id,omitempty"`
+	CartID        string                 `json:"cart_id,omitempty"`
+	OrderID       string                 `json:"order_id,omitempty"`
+	TransactionID string                 `json:"transaction_id,omitempty"` // GA4 / CAPI transaction ID
+	Items         []ECommerceItem        `json:"items,omitempty"`          // GA4 items array
+	Ecommerce     map[string]interface{} `json:"ecommerce,omitempty"`      // GTM dataLayer wrapper
 
-	// Context
+	// Context & User Identity
+	UserData   *UserData              `json:"user_data,omitempty"`
 	Path       string                 `json:"path,omitempty"`
 	Referrer   string                 `json:"referrer,omitempty"`
 	Properties map[string]interface{} `json:"properties,omitempty"`
 	Timestamp  *FlexibleTimestamp     `json:"timestamp,omitempty"`
 
-	// Testing / Simulation overrides (optional)
+	// Testing / Simulation / Server-Action client overrides
 	IP        string `json:"ip,omitempty"`
 	UserAgent string `json:"user_agent,omitempty"`
 }

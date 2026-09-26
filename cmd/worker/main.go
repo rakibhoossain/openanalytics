@@ -15,6 +15,7 @@ import (
 	"openanalytics/internal/config"
 	"openanalytics/internal/cron"
 	"openanalytics/internal/domain"
+	"openanalytics/internal/integrations/meta"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/session"
 )
@@ -79,6 +80,12 @@ func main() {
 		reportingCron.Start(ctx)
 	}
 
+	// 3c. Initialize Meta Conversions API (CAPI) Integration Engine
+	metaRepo := meta.NewRepository(chWriter.Conn(), rdb)
+	metaService := meta.NewService(ctx, metaRepo, nil)
+	defer metaService.Close()
+	log.Printf("[Worker %s] Meta CAPI forwarder service active", workerID)
+
 	// 4. Initialize Kafka Consumer Group Reader
 	consumer := kafka.NewConsumer(kafka.ConsumerConfig{
 		Brokers:       cfg.KafkaBrokers,
@@ -88,8 +95,9 @@ func main() {
 	})
 	defer consumer.Close()
 
-	// 5. Event processing pipeline (session_start, session_end, and raw events)
+	// 5. Event processing pipeline (session_start, session_end, raw events, and Meta CAPI dispatch)
 	eventHandler := func(ctx context.Context, event *domain.Event) error {
+		metaService.DispatchAsync(event)
 		return sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
 	}
 
