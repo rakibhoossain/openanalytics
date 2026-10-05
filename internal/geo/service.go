@@ -172,13 +172,19 @@ func (s *Service) Lookup(ipStr string) (*Location, error) {
 	}
 
 	loc := &Location{
-		Country:  record.Country.IsoCode,
-		City:     record.City.Names["en"],
-		Timezone: record.Location.TimeZone,
+		Country:     record.Country.IsoCode,
+		CountryCode: record.Country.IsoCode,
+		CountryName: record.Country.Names["en"],
+		City:        record.City.Names["en"],
+		PostalCode:  record.Postal.Code,
+		Continent:   record.Continent.Code,
+		Timezone:    record.Location.TimeZone,
 	}
 
 	if len(record.Subdivisions) > 0 {
 		loc.Region = record.Subdivisions[0].IsoCode
+		loc.RegionCode = record.Subdivisions[0].IsoCode
+		loc.RegionName = record.Subdivisions[0].Names["en"]
 	}
 
 	if record.Location.Latitude != 0 || record.Location.Longitude != 0 {

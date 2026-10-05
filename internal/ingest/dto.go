@@ -105,6 +105,44 @@ type ECommerceItem struct {
 	Coupon        string   `json:"coupon,omitempty"`
 }
 
+// FlexibleInt64 supports integers, floating-point numbers, and quoted numeric strings.
+type FlexibleInt64 int64
+
+func (fi *FlexibleInt64) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "null" || s == `""` || s == "" {
+		return nil
+	}
+	if num, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*fi = FlexibleInt64(num)
+		return nil
+	}
+	if fnum, err := strconv.ParseFloat(s, 64); err == nil {
+		*fi = FlexibleInt64(int64(fnum))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(b, &str); err == nil {
+		str = strings.TrimSpace(str)
+		if num, err := strconv.ParseInt(str, 10, 64); err == nil {
+			*fi = FlexibleInt64(num)
+			return nil
+		}
+		if fnum, err := strconv.ParseFloat(str, 64); err == nil {
+			*fi = FlexibleInt64(int64(fnum))
+			return nil
+		}
+	}
+	return nil
+}
+
+func (fi *FlexibleInt64) Int64() int64 {
+	if fi == nil {
+		return 0
+	}
+	return int64(*fi)
+}
+
 // TrackRequest represents an incoming telemetry tracking payload.
 type TrackRequest struct {
 	TenantID   string `json:"tenant_id,omitempty"`
@@ -117,9 +155,14 @@ type TrackRequest struct {
 	DeviceID   string `json:"device_id,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	CustomerID string `json:"customer_id,omitempty"`
+	ProfileID  string `json:"profileId,omitempty"`   // OpenPanel profileId support
+	AltProfID  string `json:"profile_id,omitempty"`
+	FirstName  string `json:"firstName,omitempty"`
+	LastName   string `json:"lastName,omitempty"`
+	Email      string `json:"email,omitempty"`
 
 	// E-Commerce telemetry (Revenue in integer cents, e.g. 100 = $1.00, 178 = $1.78, 14999 = $149.99)
-	Revenue       *int64                 `json:"revenue,omitempty"`
+	Revenue       *FlexibleInt64         `json:"revenue,omitempty"`
 	Value         *float64               `json:"value,omitempty"`         // GA4 standard decimal value (e.g. 29.99)
 	Currency      string                 `json:"currency,omitempty"`
 	ProductID     string                 `json:"product_id,omitempty"`

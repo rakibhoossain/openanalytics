@@ -105,6 +105,7 @@ func main() {
 		r.Post("/replay", ingestHandler.HandleReplay)
 		r.Post("/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
+		r.Post("/lookup", ingestHandler.HandleLookup)
 	})
 
 	server := &http.Server{

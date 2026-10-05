@@ -87,17 +87,19 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if this is an envelope request: { "type": "replay" | "track", "payload": ... }
+	// Check if this is an envelope request: { "type": "replay" | "track" | "identify", "payload": ... }
 	var envelope struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
+	envelopeType := ""
 	if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Type != "" {
+		envelopeType = envelope.Type
 		if envelope.Type == "replay" {
 			h.processReplay(w, r, envelope.Payload)
 			return
 		}
-		if (envelope.Type == "track" || envelope.Type == "identify") && len(envelope.Payload) > 0 {
+		if len(envelope.Payload) > 0 {
 			bodyBytes = envelope.Payload
 		}
 	}
@@ -108,8 +110,53 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Name == "" && req.Event != "" {
-		req.Name = req.Event
+	if req.Name == "" {
+		if req.Event != "" {
+			req.Name = req.Event
+		} else if envelopeType != "" && envelopeType != "track" {
+			req.Name = envelopeType
+		} else if req.ProfileID != "" || req.AltProfID != "" {
+			req.Name = "identify"
+		}
+	}
+
+	if req.CustomerID == "" {
+		if req.ProfileID != "" {
+			req.CustomerID = req.ProfileID
+		} else if req.AltProfID != "" {
+			req.CustomerID = req.AltProfID
+		}
+	}
+
+	if req.Name == "identify" {
+		if req.Properties == nil {
+			req.Properties = make(map[string]interface{})
+		}
+		if req.ProfileID != "" {
+			req.Properties["profileId"] = req.ProfileID
+		}
+		if req.Email != "" {
+			req.Properties["email"] = req.Email
+		}
+		if req.FirstName != "" {
+			req.Properties["firstName"] = req.FirstName
+		}
+		if req.LastName != "" {
+			req.Properties["lastName"] = req.LastName
+		}
+
+		if req.UserData == nil {
+			req.UserData = &UserData{}
+		}
+		if req.UserData.Email == "" && req.Email != "" {
+			req.UserData.Email = req.Email
+		}
+		if req.UserData.FirstName == "" && req.FirstName != "" {
+			req.UserData.FirstName = req.FirstName
+		}
+		if req.UserData.LastName == "" && req.LastName != "" {
+			req.UserData.LastName = req.LastName
+		}
 	}
 
 	if req.Name == "" {
@@ -227,7 +274,7 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		Name:         req.Name,
 		DeviceID:     deviceID,
 		SessionID:    sessionID,
-		Revenue:      req.Revenue,
+		Revenue:      flexibleInt64Ptr(req.Revenue),
 		Currency:     req.Currency,
 		ProductID:    parseUUIDPtr(req.ProductID),
 		CartID:       parseUUIDPtr(req.CartID),
@@ -404,7 +451,7 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			Name:         req.Name,
 			DeviceID:     deviceID,
 			SessionID:    sessionID,
-			Revenue:      req.Revenue,
+			Revenue:      flexibleInt64Ptr(req.Revenue),
 			Currency:     req.Currency,
 			ProductID:    parseUUIDPtr(req.ProductID),
 			CartID:       parseUUIDPtr(req.CartID),
@@ -862,19 +909,21 @@ func normalizeTrackRequest(req *TrackRequest, flatProps map[string]string) strin
 	}
 	if req.Revenue == nil {
 		if revStr, ok := flatProps["__revenue"]; ok && revStr != "" {
-			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+			if vf, err := strconv.ParseFloat(revStr, 64); err == nil {
+				v := FlexibleInt64(int64(math.Round(vf)))
 				req.Revenue = &v
 			}
 		} else if revStr, ok := flatProps["revenue"]; ok && revStr != "" {
-			if v, err := strconv.ParseInt(revStr, 10, 64); err == nil {
+			if vf, err := strconv.ParseFloat(revStr, 64); err == nil {
+				v := FlexibleInt64(int64(math.Round(vf)))
 				req.Revenue = &v
 			}
 		} else if req.Value != nil {
-			revCents := int64(math.Round(*req.Value * 100))
+			revCents := FlexibleInt64(int64(math.Round(*req.Value * 100)))
 			req.Revenue = &revCents
 		} else if valStr, ok := flatProps["value"]; ok && valStr != "" {
 			if vf, err := strconv.ParseFloat(valStr, 64); err == nil {
-				revCents := int64(math.Round(vf * 100))
+				revCents := FlexibleInt64(int64(math.Round(vf * 100)))
 				req.Revenue = &revCents
 			}
 		}
@@ -888,6 +937,14 @@ func normalizeTrackRequest(req *TrackRequest, flatProps map[string]string) strin
 	}
 
 	return eventID
+}
+
+func flexibleInt64Ptr(fi *FlexibleInt64) *int64 {
+	if fi == nil {
+		return nil
+	}
+	v := fi.Int64()
+	return &v
 }
 
 // enrichCommerceProperties formats items, user_data, and event_id into ClickHouse string properties.

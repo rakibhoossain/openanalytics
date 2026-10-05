@@ -163,6 +163,7 @@ func main() {
 		r.Post("/batch", ingestHandler.HandleBatch)
 		r.Post("/track/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
+		r.Post("/lookup", ingestHandler.HandleLookup)
 	})
 
 	ingestServer := &http.Server{
