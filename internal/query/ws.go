@@ -262,20 +262,31 @@ func extractTargetIDs(r *http.Request) (string, string) {
 		}
 	}
 
-	// 3. Fallback defaults if unspecified
-	if shopID == "" {
-		shopID = "018e69d0-7a89-7000-8b1a-200000000002"
-	}
-	if tenantID == "" {
-		tenantID = "018e69d0-7a89-7000-8b1a-200000000001"
-	}
-
 	return shopID, tenantID
+}
+
+// checkWSAuth validates the token query parameter against the target ID.
+func checkWSAuth(w http.ResponseWriter, r *http.Request, targetID string) bool {
+	if targetID == "" {
+		http.Error(w, "Unauthorized: missing shop/tenant id", http.StatusBadRequest)
+		return false
+	}
+	token := r.URL.Query().Get("token")
+	if _, err := ValidateWSToken(token, targetID); err != nil {
+		log.Printf("[WebSocket] Rejecting unauthorized connection for %s: %v", targetID, err)
+		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // ServeLiveVisitors handles GET /live/visitors/{shopId} WebSocket upgrade.
 func (h *WebSocketHub) ServeLiveVisitors(w http.ResponseWriter, r *http.Request) {
 	shopID, tenantID := extractTargetIDs(r)
+
+	if !checkWSAuth(w, r, shopID) {
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -320,6 +331,10 @@ func (h *WebSocketHub) ServeLiveVisitors(w http.ResponseWriter, r *http.Request)
 func (h *WebSocketHub) ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 	shopID, tenantID := extractTargetIDs(r)
 
+	if !checkWSAuth(w, r, shopID) {
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WebSocket] Upgrade events failed: %v", err)
@@ -344,6 +359,10 @@ func (h *WebSocketHub) ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 func (h *WebSocketHub) ServeLiveNotifications(w http.ResponseWriter, r *http.Request) {
 	shopID, tenantID := extractTargetIDs(r)
 
+	if !checkWSAuth(w, r, shopID) {
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[WebSocket] Upgrade notifications failed: %v", err)
@@ -367,6 +386,10 @@ func (h *WebSocketHub) ServeLiveNotifications(w http.ResponseWriter, r *http.Req
 // ServeLiveOrganization handles GET /live/organization/{tenantId} WebSocket upgrade.
 func (h *WebSocketHub) ServeLiveOrganization(w http.ResponseWriter, r *http.Request) {
 	_, tenantID := extractTargetIDs(r)
+
+	if !checkWSAuth(w, r, tenantID) {
+		return
+	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {

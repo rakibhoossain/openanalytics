@@ -1078,9 +1078,9 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 	}
 
 	countQuery := fmt.Sprintf(`
-		SELECT count()
-		FROM %s.sessions
-		WHERE tenant_id = ? AND shop_id = ?
+		SELECT count(DISTINCT session_id)
+		FROM %s.events
+		WHERE (tenant_id = ? OR shop_id = ?) AND session_id != '00000000-0000-0000-0000-000000000000'
 	`, s.database)
 
 	var total uint64
@@ -1088,13 +1088,33 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 
 	dataQuery := fmt.Sprintf(`
 		SELECT 
-			id, tenant_id, shop_id, device_id, customer_id,
-			started_at, ended_at, duration,
-			entry_path, exit_path, referrer, referrer_name, referrer_type,
-			events_count, has_cart_add, has_purchase, total_revenue
-		FROM %s.sessions
-		WHERE tenant_id = ? AND shop_id = ?
-		ORDER BY started_at DESC
+			session_id,
+			any(tenant_id),
+			any(shop_id),
+			any(device_id),
+			any(customer_id),
+			minIf(created_at, created_at > '2000-01-01') as started_at,
+			max(created_at) as ended_at,
+			toUInt32(greatest(0, dateDiff('second', minIf(created_at, created_at > '2000-01-01'), max(created_at)))) as duration,
+			argMinIf(path, created_at, created_at > '2000-01-01' AND path != '') as entry_path,
+			argMaxIf(path, created_at, path != '') as exit_path,
+			any(referrer) as referrer,
+			any(referrer_name) as referrer_name,
+			any(referrer_type) as referrer_type,
+			toUInt32(count()) as events_count,
+			toUInt32(countIf(name = 'screen_view')) as screen_views_count,
+			toUInt8(countIf(name ILIKE '%%cart%%') > 0) as has_cart_add,
+			toUInt8(countIf(name ILIKE '%%purchase%%' OR name ILIKE '%%order%%') > 0) as has_purchase,
+			toInt64(coalesce(sum(revenue), 0)) as total_revenue,
+			any(country) as country,
+			any(city) as city,
+			any(os) as os,
+			any(browser) as browser,
+			any(device) as device
+		FROM %s.events
+		WHERE (tenant_id = ? OR shop_id = ?) AND session_id != '00000000-0000-0000-0000-000000000000'
+		GROUP BY session_id
+		ORDER BY ended_at DESC
 		LIMIT ? OFFSET ?
 	`, s.database)
 
@@ -1112,7 +1132,8 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 			&sess.ID, &sess.TenantID, &sess.ShopID, &sess.DeviceID, &sess.CustomerID,
 			&sess.StartedAt, &sess.EndedAt, &sess.Duration,
 			&sess.EntryPath, &sess.ExitPath, &sess.Referrer, &sess.ReferrerName, &sess.ReferrerType,
-			&sess.EventsCount, &cartAdd, &purch, &sess.TotalRevenue,
+			&sess.EventsCount, &sess.ScreenViewsCount, &cartAdd, &purch, &sess.TotalRevenue,
+			&sess.Country, &sess.City, &sess.OS, &sess.Browser, &sess.Device,
 		); err == nil {
 			sess.HasCartAdd = cartAdd > 0
 			sess.HasPurchase = purch > 0

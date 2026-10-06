@@ -331,8 +331,8 @@ Send a telemetry event with a simulated public IP:
 curl -X POST http://localhost:8080/api/v1/track \
   -H "Content-Type: application/json" \
   -d '{
-    "shop_id": "018e69d0-7a89-7000-8b1a-200000000002",
-    "tenant_id": "018e69d0-7a89-7000-8b1a-200000000001",
+    "shop_id": "019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1",
+    "tenant_id": "019f5bfa-f6e4-76c0-9929-ed0daba7b14b",
     "name": "checkout_step_viewed",
     "ip": "8.8.8.8",
     "path": "/checkout"

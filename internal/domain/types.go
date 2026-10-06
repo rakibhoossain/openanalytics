@@ -60,10 +60,17 @@ type Session struct {
 	ReferrerName string `json:"referrer_name,omitempty"`
 	ReferrerType string `json:"referrer_type,omitempty"`
 
-	EventsCount  uint32 `json:"events_count"`
-	HasCartAdd   bool   `json:"has_cart_add"`
-	HasPurchase  bool   `json:"has_purchase"`
-	TotalRevenue int64  `json:"total_revenue"` // Stored in integer cents
+	EventsCount      uint32 `json:"events_count"`
+	ScreenViewsCount uint32 `json:"screen_views_count,omitempty"`
+	HasCartAdd       bool   `json:"has_cart_add"`
+	HasPurchase      bool   `json:"has_purchase"`
+	TotalRevenue     int64  `json:"total_revenue"` // Stored in integer cents
+
+	Country string `json:"country,omitempty"`
+	City    string `json:"city,omitempty"`
+	OS      string `json:"os,omitempty"`
+	Browser string `json:"browser,omitempty"`
+	Device  string `json:"device,omitempty"`
 }
 
 // OverviewMetrics holds current and previous period comparison metric values.

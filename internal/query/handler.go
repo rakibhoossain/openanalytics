@@ -2,7 +2,9 @@ package query
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -88,6 +90,10 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/api/v1/misc", mountMisc)
 
 	r.Route("/api/v1", func(r chi.Router) {
+		r.Route("/auth", func(r chi.Router) {
+			r.Get("/ws-token", h.HandleCreateWSToken)
+			r.Post("/ws-token", h.HandleCreateWSToken)
+		})
 		r.Route("/misc", mountMisc)
 		// Analytics Query APIs
 		r.Route("/query", func(r chi.Router) {
@@ -110,6 +116,12 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 			// Explorers
 			r.Get("/events", h.HandleListEvents)
 			r.Get("/sessions", h.HandleListSessions)
+			r.Get("/sessions/{id}", h.HandleTRPCSessionById)
+			r.Get("/session.byId", h.HandleTRPCSessionById)
+			r.Get("/session.list", h.HandleTRPCSessionList)
+			r.Get("/session.sessions", h.HandleTRPCSessionList)
+			r.Get("/profiles", h.HandleListProfiles)
+			r.Get("/profiles/{id}", h.HandleGetProfile)
 		})
 
 		// Dashboard Metadata APIs
@@ -207,6 +219,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Get("/event.conversions", h.HandleTRPCConversions)
 		r.Get("/event.conversionNames", h.HandleTRPCConversionNames)
 		r.Get("/event.eventNames", h.HandleTRPCEventNames)
+		r.Get("/event.details", h.HandleTRPCEventDetails)
 		r.Get("/event.list", h.HandleTRPCEvents)
 		r.Get("/event.pages", h.HandleTRPCEventPages)
 		r.Get("/event.previousPages", h.HandleTRPCEventPreviousPages)
@@ -225,6 +238,8 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Get("/profile.mostEvents", h.HandleTRPCProfileMostEvents)
 		r.Get("/profile.popularRoutes", h.HandleTRPCProfilePopularRoutes)
 		r.Get("/profile.properties", h.HandleTRPCProfileProperties)
+		r.Get("/profile.charts", h.HandleTRPCProfileCharts)
+		r.Post("/profile.charts", h.HandleTRPCProfileCharts)
 
 		// Group
 		r.Get("/group.list", h.HandleTRPCGroupList)
@@ -547,12 +562,8 @@ func roundVal(val float64, precision int) float64 {
 	return math.Round(val*pow) / pow
 }
 
-
 // Helper: extract tenant_id and shop_id from headers, query parameters, or tRPC input.
 func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, error) {
-	defaultTenant := uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	defaultShop := uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000002")
-
 	tStr := r.Header.Get("X-Tenant-ID")
 	if tStr == "" {
 		tStr = r.URL.Query().Get("tenant_id")
@@ -589,28 +600,59 @@ func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, e
 		}
 	}
 
-	var tenantID, shopID uuid.UUID
-	var err error
+	if sStr == "" || sStr == "default" || sStr == "undefined" {
+		return uuid.Nil, uuid.Nil, errors.New("missing or invalid shop_id")
+	}
+	shopID, err := uuid.Parse(sStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid shop_id: %w", err)
+	}
 
-	if tStr == "" || tStr == "default" || tStr == "undefined" {
-		tenantID = defaultTenant
-	} else {
+	var tenantID uuid.UUID
+	if tStr != "" && tStr != "default" && tStr != "undefined" {
 		tenantID, err = uuid.Parse(tStr)
 		if err != nil {
-			tenantID = defaultTenant
+			return uuid.Nil, uuid.Nil, fmt.Errorf("invalid tenant_id: %w", err)
 		}
 	}
 
-	if sStr == "" || sStr == "default" || sStr == "undefined" {
-		shopID = defaultShop
-	} else {
-		shopID, err = uuid.Parse(sStr)
-		if err != nil {
-			shopID = defaultShop
-		}
+	// If tenantID was not explicitly specified by client, dynamically resolve from database for this shopID
+	if tenantID == uuid.Nil {
+		tenantID = h.resolveTenantForShop(r.Context(), shopID)
 	}
 
 	return tenantID, shopID, nil
+}
+
+// resolveTenantForShop queries ClickHouse/Redis dynamically to find the tenant owning this shop.
+func (h *Handler) resolveTenantForShop(ctx context.Context, shopID uuid.UUID) uuid.UUID {
+	if shopID == uuid.Nil {
+		return uuid.Nil
+	}
+	cacheKey := fmt.Sprintf("shop_tenant:%s", shopID.String())
+	if h.rdb != nil {
+		if val, err := h.rdb.Get(ctx, cacheKey).Result(); err == nil && val != "" {
+			if tid, err := uuid.Parse(val); err == nil {
+				return tid
+			}
+		}
+	}
+	if h.queryService != nil && h.queryService.conn != nil {
+		var tidStr string
+		err := h.queryService.conn.QueryRow(ctx, fmt.Sprintf(
+			"SELECT toString(tenant_id) FROM %s.events WHERE shop_id = ? AND tenant_id != toUUID('00000000-0000-0000-0000-000000000000') LIMIT 1",
+			h.queryService.database,
+		), shopID).Scan(&tidStr)
+		if err == nil && tidStr != "" {
+			if tid, err := uuid.Parse(tidStr); err == nil {
+				if h.rdb != nil {
+					_ = h.rdb.Set(ctx, cacheKey, tid.String(), 24*time.Hour).Err()
+				}
+				return tid
+			}
+		}
+	}
+	return uuid.Nil
 }
 
 // HandleIntents returns real-time scored shoppers from Redis feature store.
@@ -672,6 +714,22 @@ func sendTRPCResponse(w http.ResponseWriter, data any) {
 		"result": map[string]any{
 			"data": map[string]any{
 				"json": data,
+			},
+		},
+	})
+}
+
+// sendTRPCError encodes an error into the standard tRPC error envelope.
+func sendTRPCError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"code":    -32600,
+			"data": map[string]any{
+				"code":       "BAD_REQUEST",
+				"httpStatus": status,
 			},
 		},
 	})
@@ -897,10 +955,207 @@ func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleListProfiles serves GET /api/v1/query/profiles
+func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+
+	filterType := h.getParam(r, "type")
+	search := strings.TrimSpace(h.getParam(r, "search"))
+	limit := 50
+	offset := 0
+	if lStr := h.getParam(r, "limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if oStr := h.getParam(r, "offset"); oStr != "" {
+		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	var whereExtra []string
+	var args []any
+	args = append(args, tenantID, shopID)
+
+	if filterType == "identified" {
+		whereExtra = append(whereExtra, "AND customer_id IS NOT NULL AND toString(customer_id) != '00000000-0000-0000-0000-000000000000'")
+	} else if filterType == "anonymous" {
+		whereExtra = append(whereExtra, "AND (customer_id IS NULL OR toString(customer_id) = '00000000-0000-0000-0000-000000000000')")
+	}
+
+	if search != "" {
+		pattern := "%" + search + "%"
+		whereExtra = append(whereExtra, "AND (device_id ILIKE ? OR toString(customer_id) ILIKE ? OR country ILIKE ? OR city ILIKE ? OR browser ILIKE ? OR os ILIKE ? OR device ILIKE ?)")
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+
+	orderClause := "ORDER BY last_seen DESC"
+	if filterType == "power_users" {
+		orderClause = "ORDER BY total_revenue DESC, events_count DESC"
+	}
+
+	whereStr := strings.Join(whereExtra, " ")
+	query := fmt.Sprintf(`
+		SELECT
+			device_id,
+			toString(any(customer_id)) as customer_id,
+			count(*) as events_count,
+			uniqExact(session_id) as sessions_count,
+			coalesce(sum(revenue), 0) as total_revenue,
+			min(created_at) as first_seen,
+			max(created_at) as last_seen,
+			any(country) as country,
+			any(city) as city,
+			any(browser) as browser,
+			any(os) as os,
+			any(device) as device
+		FROM %s.events
+		WHERE tenant_id = ? AND shop_id = ? %s
+		GROUP BY device_id
+		%s
+		LIMIT ? OFFSET ?
+	`, h.queryService.database, whereStr, orderClause)
+
+	args = append(args, limit, offset)
+
+	var items []map[string]any
+	if rows, err := h.queryService.Conn().Query(r.Context(), query, args...); err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var devID, custID, country, city, browser, os, device string
+			var evCount, sessCount uint64
+			var revCents int64
+			var firstSeen, lastSeen time.Time
+			if err := rows.Scan(&devID, &custID, &evCount, &sessCount, &revCents, &firstSeen, &lastSeen, &country, &city, &browser, &os, &device); err == nil {
+				isIdentified := custID != "" && custID != "00000000-0000-0000-0000-000000000000"
+				items = append(items, map[string]any{
+					"id":             devID,
+					"device_id":      devID,
+					"customer_id":    custID,
+					"is_identified":  isIdentified,
+					"events_count":   evCount,
+					"sessions_count": sessCount,
+					"total_revenue":  float64(revCents) / 100.0,
+					"first_seen":     firstSeen.UTC().Format(time.RFC3339),
+					"last_seen":      lastSeen.UTC().Format(time.RFC3339),
+					"country":        country,
+					"city":           city,
+					"browser":        browser,
+					"os":             os,
+					"device":         device,
+				})
+			}
+		}
+	}
+	if items == nil {
+		items = []map[string]any{}
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]any{
+		"profiles": items,
+		"total":    len(items),
+	})
+}
+
+// HandleGetProfile serves GET /api/v1/query/profiles/{id}
+func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	profileID := chi.URLParam(r, "id")
+	if profileID == "" {
+		profileID = h.getParam(r, "id")
+	}
+	if profileID == "" {
+		profileID = h.getParam(r, "profileId")
+	}
+	if profileID == "" {
+		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "profile id required")
+		return
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			device_id,
+			toString(any(customer_id)) as customer_id,
+			count(*) as events_count,
+			uniqExact(session_id) as sessions_count,
+			coalesce(sum(revenue), 0) as total_revenue,
+			min(created_at) as first_seen,
+			max(created_at) as last_seen,
+			any(country) as country,
+			any(city) as city,
+			any(browser) as browser,
+			any(os) as os,
+			any(device) as device
+		FROM %s.events
+		WHERE tenant_id = ? AND shop_id = ? AND (device_id = ? OR toString(customer_id) = ?)
+		GROUP BY device_id
+		LIMIT 1
+	`, h.queryService.database)
+
+	var devID, custID string
+	var evCount, sessCount uint64
+	var totRev int64
+	var firstSeen, lastSeen time.Time
+	var country, city, browser, osName, device string
+
+	row := h.queryService.Conn().QueryRow(r.Context(), query, tenantID, shopID, profileID, profileID)
+	err = row.Scan(&devID, &custID, &evCount, &sessCount, &totRev, &firstSeen, &lastSeen, &country, &city, &browser, &osName, &device)
+	if err != nil {
+		now := time.Now()
+		httputil.JSON(w, http.StatusOK, map[string]any{
+			"device_id":      profileID,
+			"customer_id":    "",
+			"events_count":   0,
+			"sessions_count": 0,
+			"total_revenue":  0,
+			"first_seen":     now.Format("2006-01-02T15:04:05.000Z"),
+			"last_seen":      now.Format("2006-01-02T15:04:05.000Z"),
+			"country":        "",
+			"city":           "",
+			"browser":        "",
+			"os":             "",
+			"device":         "desktop",
+			"is_identified":  false,
+		})
+		return
+	}
+
+	isIdentified := custID != "" && custID != "00000000-0000-0000-0000-000000000000"
+
+	httputil.JSON(w, http.StatusOK, map[string]any{
+		"device_id":      devID,
+		"customer_id":    custID,
+		"events_count":   evCount,
+		"sessions_count": sessCount,
+		"total_revenue":  totRev,
+		"first_seen":     firstSeen.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"last_seen":      lastSeen.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"country":        country,
+		"city":           city,
+		"browser":        browser,
+		"os":             osName,
+		"device":         device,
+		"is_identified":  isIdentified,
+	})
+}
+
 // --- tRPC Gateway Handlers ---
 
 func (h *Handler) HandleTRPCOverviewStats(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	rangeStr := h.getParam(r, "range")
 	intervalStr := h.getParam(r, "interval")
 	startStr := h.getParam(r, "startDate")
@@ -945,11 +1200,20 @@ func (h *Handler) HandleTRPCOverviewTopGenericSeries(w http.ResponseWriter, r *h
 	endStr := h.getParam(r, "endDate")
 
 	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, 10)
-	if err != nil || items == nil {
-		items = []domain.TopItem{}
+	seriesItems := make([]map[string]any, 0)
+	if err == nil && items != nil {
+		for _, it := range items {
+			seriesItems = append(seriesItems, map[string]any{
+				"name":      it.Name,
+				"sessions":  it.Sessions,
+				"pageviews": it.Pageviews,
+				"revenue":   it.Revenue,
+				"data":      []any{},
+			})
+		}
 	}
 	sendTRPCResponse(w, map[string]any{
-		"items":  items,
+		"items":  seriesItems,
 		"series": []any{},
 	})
 }
@@ -1600,25 +1864,77 @@ func (h *Handler) HandleTRPCProfileMetrics(w http.ResponseWriter, r *http.Reques
 	}
 
 	metrics := map[string]any{
-		"events":      0,
-		"sessions":    0,
-		"avgDuration": 0,
+		"totalEvents":            0,
+		"events":                 0,
+		"sessions":               0,
+		"screenViews":            0,
+		"avgEventsPerSession":    0.0,
+		"bounceRate":             0.0,
+		"durationAvg":            0.0,
+		"durationP90":            0.0,
+		"firstSeen":              nil,
+		"lastSeen":               nil,
+		"uniqueDaysActive":       0,
+		"conversionEvents":       0,
+		"avgTimeBetweenSessions": 0.0,
+		"revenue":                0.0,
 	}
 
 	if profileID != "" {
-		query := fmt.Sprintf(`
-			SELECT count(*), count(distinct session_id)
+		evQuery := fmt.Sprintf(`
+			SELECT 
+				count(*),
+				count(distinct session_id),
+				countIf(name = 'screen_view' OR name = 'page_view'),
+				round(count(*) / greatest(1, count(distinct session_id)), 1),
+				countIf(name ILIKE '%%purchase%%' OR name ILIKE '%%order%%'),
+				minIf(created_at, created_at > '2000-01-01'),
+				max(created_at),
+				count(distinct toDate(created_at)),
+				round(sum(coalesce(revenue, 0)) / 100, 2)
 			FROM %s.events
-			WHERE device_id = ?
+			WHERE (device_id = ? OR toString(customer_id) = ?)
 		`, h.queryService.database)
-		var evCount, sessCount uint64
-		if err := h.queryService.Conn().QueryRow(r.Context(), query, profileID).Scan(&evCount, &sessCount); err == nil {
-			metrics["events"] = int64(evCount)
-			metrics["sessions"] = int64(sessCount)
+		var totalEv, totalSess, screenViews, convEv, uniqueDays uint64
+		var avgEvPerSess, rev float64
+		var firstSeen, lastSeen time.Time
+		if err := h.queryService.Conn().QueryRow(r.Context(), evQuery, profileID, profileID).Scan(
+			&totalEv, &totalSess, &screenViews, &avgEvPerSess, &convEv,
+			&firstSeen, &lastSeen, &uniqueDays, &rev,
+		); err == nil && totalEv > 0 {
+			metrics["totalEvents"] = totalEv
+			metrics["events"] = totalEv
+			metrics["sessions"] = totalSess
+			metrics["screenViews"] = screenViews
+			metrics["avgEventsPerSession"] = avgEvPerSess
+			metrics["conversionEvents"] = convEv
+			metrics["firstSeen"] = firstSeen.UTC().Format("2006-01-02T15:04:05.000Z")
+			metrics["lastSeen"] = lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
+			metrics["uniqueDaysActive"] = uniqueDays
+			metrics["revenue"] = rev
+		}
+
+		sessQuery := fmt.Sprintf(`
+			SELECT 
+				coalesce(round(avg(duration) / 60, 1), 0),
+				coalesce(round(quantile(0.90)(duration) / 60, 1), 0),
+				coalesce(round(countIf(events_count <= 1) * 100.0 / greatest(1, count()), 1), 0)
+			FROM %s.sessions
+			WHERE (device_id = ? OR toString(customer_id) = ?)
+		`, h.queryService.database)
+		var avgDur, p90Dur, bounceRate float64
+		if err := h.queryService.Conn().QueryRow(r.Context(), sessQuery, profileID, profileID).Scan(&avgDur, &p90Dur, &bounceRate); err == nil {
+			metrics["durationAvg"] = avgDur
+			metrics["durationP90"] = p90Dur
+			metrics["bounceRate"] = bounceRate
 		}
 	}
 
-	sendTRPCResponse(w, metrics)
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, metrics)
+	} else {
+		sendTRPCResponse(w, metrics)
+	}
 }
 
 func (h *Handler) HandleTRPCProfileActivity(w http.ResponseWriter, r *http.Request) {
@@ -1642,12 +1958,12 @@ func (h *Handler) HandleTRPCProfileActivity(w http.ResponseWriter, r *http.Reque
 		query := fmt.Sprintf(`
 			SELECT count(*), toStartOfDay(created_at) as dt
 			FROM %s.events
-			WHERE device_id = ?
+			WHERE (device_id = ? OR toString(customer_id) = ?) AND created_at > '2000-01-01'
 			GROUP BY dt
 			ORDER BY dt DESC
 			LIMIT 30
 		`, h.queryService.database)
-		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID); err == nil {
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID, profileID); err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var count uint64
@@ -1664,7 +1980,11 @@ func (h *Handler) HandleTRPCProfileActivity(w http.ResponseWriter, r *http.Reque
 	if res == nil {
 		res = []ActItem{}
 	}
-	sendTRPCResponse(w, res)
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, res)
+	} else {
+		sendTRPCResponse(w, res)
+	}
 }
 
 func (h *Handler) HandleTRPCProfileMostEvents(w http.ResponseWriter, r *http.Request) {
@@ -1688,12 +2008,12 @@ func (h *Handler) HandleTRPCProfileMostEvents(w http.ResponseWriter, r *http.Req
 		query := fmt.Sprintf(`
 			SELECT name, count(*)
 			FROM %s.events
-			WHERE device_id = ? AND name NOT IN ('screen_view', 'session_start', 'session_end')
+			WHERE (device_id = ? OR toString(customer_id) = ?) AND name NOT IN ('screen_view', 'session_start', 'session_end')
 			GROUP BY name
 			ORDER BY count(*) DESC
 			LIMIT 10
 		`, h.queryService.database)
-		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID); err == nil {
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID, profileID); err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var name string
@@ -1710,7 +2030,11 @@ func (h *Handler) HandleTRPCProfileMostEvents(w http.ResponseWriter, r *http.Req
 	if res == nil {
 		res = []EvCount{}
 	}
-	sendTRPCResponse(w, res)
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, res)
+	} else {
+		sendTRPCResponse(w, res)
+	}
 }
 
 func (h *Handler) HandleTRPCProfilePopularRoutes(w http.ResponseWriter, r *http.Request) {
@@ -1734,12 +2058,12 @@ func (h *Handler) HandleTRPCProfilePopularRoutes(w http.ResponseWriter, r *http.
 		query := fmt.Sprintf(`
 			SELECT path, count(*)
 			FROM %s.events
-			WHERE device_id = ? AND path != ''
+			WHERE (device_id = ? OR toString(customer_id) = ?) AND path != ''
 			GROUP BY path
 			ORDER BY count(*) DESC
 			LIMIT 10
 		`, h.queryService.database)
-		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID); err == nil {
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, profileID, profileID); err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var path string
@@ -1756,11 +2080,163 @@ func (h *Handler) HandleTRPCProfilePopularRoutes(w http.ResponseWriter, r *http.
 	if res == nil {
 		res = []RouteItem{}
 	}
-	sendTRPCResponse(w, res)
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, res)
+	} else {
+		sendTRPCResponse(w, res)
+	}
 }
 
 func (h *Handler) HandleTRPCProfileProperties(w http.ResponseWriter, r *http.Request) {
 	sendTRPCResponse(w, []string{"city", "country", "browser", "os", "device"})
+}
+
+func (h *Handler) HandleTRPCProfileCharts(w http.ResponseWriter, r *http.Request) {
+	input := parseTRPCInput(r)
+	profileID := ""
+	if input != nil {
+		if pid, ok := input["profileId"].(string); ok {
+			profileID = pid
+		}
+	}
+	if profileID == "" {
+		profileID = r.URL.Query().Get("profileId")
+	}
+
+	endTime := time.Now().UTC()
+	startTime := endTime.Add(-30 * 24 * time.Hour)
+
+	var dateList []string
+	cur := startTime.Truncate(24 * time.Hour)
+	end := endTime.Truncate(24 * time.Hour)
+	for !cur.After(end) {
+		dateList = append(dateList, cur.Format("2006-01-02T15:04:05.000Z"))
+		cur = cur.Add(24 * time.Hour)
+	}
+
+	buildProfileChartResp := func(breakdownCol string, filterWhere string, filterArgs ...any) map[string]any {
+		args := []any{startTime, endTime}
+		args = append(args, filterArgs...)
+
+		query := fmt.Sprintf(`
+			SELECT
+				%s as val,
+				toStartOfDay(created_at) as dt,
+				count(*) as count
+			FROM %s.events
+			WHERE created_at >= ? AND created_at <= ?
+			  %s
+			GROUP BY val, dt
+			ORDER BY val ASC, dt ASC
+		`, breakdownCol, h.queryService.database, filterWhere)
+
+		countsByValAndDate := make(map[string]map[string]uint64)
+		var valOrder []string
+		valTotals := make(map[string]uint64)
+
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, args...); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var val string
+				var dt time.Time
+				var c uint64
+				if err := rows.Scan(&val, &dt, &c); err == nil {
+					if val == "" {
+						continue
+					}
+					dtStr := dt.UTC().Truncate(24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+					if _, exists := countsByValAndDate[val]; !exists {
+						countsByValAndDate[val] = make(map[string]uint64)
+						valOrder = append(valOrder, val)
+					}
+					countsByValAndDate[val][dtStr] = c
+					valTotals[val] += c
+				}
+			}
+		}
+
+		sort.Slice(valOrder, func(i, j int) bool {
+			return valTotals[valOrder[i]] > valTotals[valOrder[j]]
+		})
+		if len(valOrder) > 10 {
+			valOrder = valOrder[:10]
+		}
+
+		var seriesList []map[string]any
+		var totalSum uint64 = 0
+
+		for _, val := range valOrder {
+			dateCounts := countsByValAndDate[val]
+			var serieSum uint64 = 0
+			var serieMin uint64 = 0
+			var serieMax uint64 = 0
+			var serieData []map[string]any
+
+			for idx, d := range dateList {
+				c := dateCounts[d]
+				serieSum += c
+				if idx == 0 || c < serieMin {
+					serieMin = c
+				}
+				if idx == 0 || c > serieMax {
+					serieMax = c
+				}
+				serieData = append(serieData, map[string]any{
+					"date":  d,
+					"count": c,
+				})
+			}
+			totalSum += serieSum
+			avg := float64(0)
+			if len(dateList) > 0 {
+				avg = float64(serieSum) / float64(len(dateList))
+			}
+
+			seriesList = append(seriesList, map[string]any{
+				"id":    val,
+				"name":  val,
+				"names": []string{"Events", val},
+				"event": map[string]any{
+					"id":   val,
+					"name": val,
+				},
+				"metrics": map[string]any{
+					"sum":     serieSum,
+					"average": roundVal(avg, 2),
+					"min":     serieMin,
+					"max":     serieMax,
+					"count":   serieSum,
+				},
+				"data": serieData,
+			})
+		}
+
+		globalAvg := float64(0)
+		if len(dateList) > 0 {
+			globalAvg = float64(totalSum) / float64(len(dateList))
+		}
+
+		return map[string]any{
+			"series": seriesList,
+			"metrics": map[string]any{
+				"sum":     totalSum,
+				"average": roundVal(globalAvg, 2),
+				"min":     0,
+				"max":     totalSum,
+			},
+		}
+	}
+
+	pageViewsFilter := "AND (device_id = ? OR toString(customer_id) = ?) AND path != '' AND (name IN ('screen_view', 'page_view') OR (path != '' AND name != 'session_end'))"
+	eventsFilter := "AND (device_id = ? OR toString(customer_id) = ?)"
+
+	pageViewsChart := buildProfileChartResp("path", pageViewsFilter, profileID, profileID)
+	eventsChart := buildProfileChartResp("name", eventsFilter, profileID, profileID)
+
+	sendTRPCResponse(w, map[string]any{
+		"pageViews": pageViewsChart,
+		"events":    eventsChart,
+	})
 }
 
 func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) {
@@ -1773,6 +2249,9 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 	}
 	if sessIDStr == "" {
 		sessIDStr = r.URL.Query().Get("sessionId")
+	}
+	if sessIDStr == "" {
+		sessIDStr = chi.URLParam(r, "id")
 	}
 
 	sess := map[string]any{
@@ -1798,22 +2277,58 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 		"hasReplay":       false,
 	}
 
+	eventsList := make([]map[string]any, 0)
+
 	if parsedID, err := uuid.Parse(sessIDStr); err == nil {
-		query := fmt.Sprintf(`
+		// Query summary from events for accurate duration and timestamps
+		evSummaryQuery := fmt.Sprintf(`
 			SELECT
-				started_at, duration, entry_path, exit_path,
-				referrer, referrer_name, events_count
-			FROM %s.sessions
-			WHERE id = ?
-			LIMIT 1
+				minIf(created_at, created_at > '2000-01-01') as started_at,
+				max(created_at) as ended_at,
+				toUInt32(greatest(0, dateDiff('second', minIf(created_at, created_at > '2000-01-01'), max(created_at)))) as duration,
+				argMinIf(path, created_at, created_at > '2000-01-01' AND path != '') as entry_path,
+				argMaxIf(path, created_at, path != '') as exit_path,
+				any(referrer) as referrer,
+				any(referrer_name) as referrer_name,
+				toUInt32(count()) as events_count,
+				toUInt32(countIf(name = 'screen_view')) as screen_views_count,
+				toInt64(coalesce(sum(revenue), 0)) as total_revenue,
+				any(country) as country,
+				any(city) as city,
+				any(os) as os,
+				any(browser) as browser,
+				any(device) as device,
+				any(device_id) as device_id,
+				toString(any(customer_id)) as customer_id
+			FROM %s.events
+			WHERE session_id = ?
 		`, h.queryService.database)
-		var startedAt time.Time
-		var dur, evCount uint32
+
+		var startedAt, endedAt time.Time
+		var dur, evCount, screenCount uint32
 		var entryPath, exitPath, ref, refName string
-		if err := h.queryService.Conn().QueryRow(r.Context(), query, parsedID).Scan(&startedAt, &dur, &entryPath, &exitPath, &ref, &refName, &evCount); err == nil {
+		var rev int64
+		var country, city, osName, browser, device, devID, custID string
+		if err := h.queryService.Conn().QueryRow(r.Context(), evSummaryQuery, parsedID).Scan(
+			&startedAt, &endedAt, &dur, &entryPath, &exitPath, &ref, &refName,
+			&evCount, &screenCount, &rev,
+			&country, &city, &osName, &browser, &device, &devID, &custID,
+		); err == nil && evCount > 0 {
+			if entryPath == "" {
+				entryPath = "/"
+			}
+			if exitPath == "" {
+				exitPath = entryPath
+			}
+			if refName == "" {
+				refName = ref
+			}
+			if refName == "" {
+				refName = "Direct"
+			}
 			sess["createdAt"] = startedAt.UTC().Format("2006-01-02T15:04:05.000Z")
 			sess["startedAt"] = startedAt.UTC().Format("2006-01-02T15:04:05.000Z")
-			sess["endedAt"] = startedAt.Add(time.Duration(dur) * time.Second).UTC().Format("2006-01-02T15:04:05.000Z")
+			sess["endedAt"] = endedAt.UTC().Format("2006-01-02T15:04:05.000Z")
 			sess["duration"] = dur * 1000
 			sess["entryPath"] = entryPath
 			sess["exitPath"] = exitPath
@@ -1821,23 +2336,55 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 			sess["referrerName"] = refName
 			sess["events"] = evCount
 			sess["eventCount"] = evCount
-			sess["screenViewCount"] = evCount
+			sess["screenViewCount"] = screenCount
 			sess["isBounce"] = evCount <= 1
-		}
-
-		// Also grab geo/device from events
-		evQuery := fmt.Sprintf(`
-			SELECT any(country), any(city), any(os), any(browser), any(device)
-			FROM %s.events
-			WHERE session_id = ?
-		`, h.queryService.database)
-		var country, city, os, browser, device string
-		if err := h.queryService.Conn().QueryRow(r.Context(), evQuery, parsedID).Scan(&country, &city, &os, &browser, &device); err == nil {
+			sess["revenue"] = float64(rev) / 100.0
 			sess["country"] = country
 			sess["city"] = city
-			sess["os"] = os
+			sess["os"] = osName
 			sess["browser"] = browser
 			sess["device"] = device
+			sess["deviceId"] = devID
+			sess["profileId"] = devID
+			if custID != "" && custID != "00000000-0000-0000-0000-000000000000" {
+				sess["profileId"] = custID
+			}
+		}
+
+		// Query individual events for this session
+		evRowsQuery := fmt.Sprintf(`
+			SELECT id, name, path, origin, coalesce(revenue, 0), currency, created_at, properties
+			FROM %s.events
+			WHERE session_id = ?
+			ORDER BY created_at ASC
+			LIMIT 100
+		`, h.queryService.database)
+		if rows, err := h.queryService.Conn().Query(r.Context(), evRowsQuery, parsedID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var evID uuid.UUID
+				var name, path, origin, cur string
+				var rev int64
+				var cAt time.Time
+				var props map[string]string
+				if err := rows.Scan(&evID, &name, &path, &origin, &rev, &cur, &cAt, &props); err == nil {
+					pMap := make(map[string]any)
+					for k, v := range props {
+						pMap[k] = v
+					}
+					eventsList = append(eventsList, map[string]any{
+						"id":         evID.String(),
+						"name":       name,
+						"path":       path,
+						"origin":     origin,
+						"revenue":    rev,
+						"currency":   cur,
+						"created_at": cAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+						"createdAt":  cAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+						"properties": pMap,
+					})
+				}
+			}
 		}
 
 		// Check if this session has recorded replay chunks
@@ -1852,7 +2399,19 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	sendTRPCResponse(w, sess)
+	result := make(map[string]any)
+	for k, v := range sess {
+		result[k] = v
+	}
+	result["session"] = sess
+	result["events"] = eventsList
+	result["eventList"] = eventsList
+
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, result)
+	} else {
+		sendTRPCResponse(w, result)
+	}
 }
 
 func (h *Handler) HandleTRPCReplayChunksFrom(w http.ResponseWriter, r *http.Request) {
@@ -1929,7 +2488,6 @@ func (h *Handler) HandleTRPCReplayChunksFrom(w http.ResponseWriter, r *http.Requ
 		"hasMore": hasMore,
 	})
 }
-
 
 func (h *Handler) HandleTRPCGroupList(w http.ResponseWriter, r *http.Request) {
 	sendTRPCResponse(w, map[string]any{
@@ -2270,6 +2828,105 @@ func (h *Handler) HandleTRPCConversions(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (h *Handler) HandleTRPCEventDetails(w http.ResponseWriter, r *http.Request) {
+	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	input := parseTRPCInput(r)
+
+	eventIDStr := ""
+	if input != nil {
+		if id, ok := input["id"].(string); ok {
+			eventIDStr = id
+		}
+	}
+	if eventIDStr == "" {
+		eventIDStr = r.URL.Query().Get("id")
+	}
+
+	evID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		sendTRPCResponse(w, map[string]any{"event": nil, "session": nil})
+		return
+	}
+
+	query := fmt.Sprintf(`
+		SELECT 
+			id, tenant_id, shop_id, name, device_id, customer_id, session_id,
+			coalesce(revenue, 0), currency, product_id, cart_id, order_id,
+			path, origin, referrer, referrer_name, referrer_type,
+			os, browser, device, country, city, properties, created_at
+		FROM %s.events
+		WHERE tenant_id = ? AND shop_id = ? AND id = ?
+		LIMIT 1
+	`, h.queryService.database)
+
+	var ev domain.Event
+	var revCents int64
+	row := h.queryService.Conn().QueryRow(r.Context(), query, tenantID, shopID, evID)
+	if err := row.Scan(
+		&ev.ID, &ev.TenantID, &ev.ShopID, &ev.Name, &ev.DeviceID, &ev.CustomerID, &ev.SessionID,
+		&revCents, &ev.Currency, &ev.ProductID, &ev.CartID, &ev.OrderID,
+		&ev.Path, &ev.Origin, &ev.Referrer, &ev.ReferrerName, &ev.ReferrerType,
+		&ev.OS, &ev.Browser, &ev.Device, &ev.Country, &ev.City, &ev.Properties, &ev.CreatedAt,
+	); err != nil {
+		sendTRPCResponse(w, map[string]any{"event": nil, "session": nil})
+		return
+	}
+
+	profID := ev.DeviceID
+	if ev.CustomerID != nil && *ev.CustomerID != uuid.Nil {
+		profID = ev.CustomerID.String()
+	}
+
+	eventMap := map[string]any{
+		"id":           ev.ID.String(),
+		"name":         ev.Name,
+		"path":         ev.Path,
+		"origin":       ev.Origin,
+		"referrer":     ev.Referrer,
+		"referrerName": ev.ReferrerName,
+		"referrerType": ev.ReferrerType,
+		"sessionId":    ev.SessionID.String(),
+		"profileId":    profID,
+		"deviceId":     ev.DeviceID,
+		"country":      ev.Country,
+		"city":         ev.City,
+		"os":           ev.OS,
+		"browser":      ev.Browser,
+		"device":       ev.Device,
+		"revenue":      revCents,
+		"currency":     ev.Currency,
+		"createdAt":    ev.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"properties":   ev.Properties,
+	}
+
+	var sessMap any = nil
+	sessRow := h.queryService.Conn().QueryRow(r.Context(), fmt.Sprintf(`
+		SELECT id, duration, started_at, ended_at, entry_path, exit_path
+		FROM %s.sessions
+		WHERE tenant_id = ? AND shop_id = ? AND id = ?
+		LIMIT 1
+	`, h.queryService.database), tenantID, shopID, ev.SessionID)
+	var sID uuid.UUID
+	var sDur int64
+	var sStart, sEnd time.Time
+	var sEntry, sExit string
+	if err := sessRow.Scan(&sID, &sDur, &sStart, &sEnd, &sEntry, &sExit); err == nil {
+		sessMap = map[string]any{
+			"id":        sID.String(),
+			"duration":  sDur,
+			"startedAt": sStart.UTC().Format("2006-01-02T15:04:05.000Z"),
+			"endedAt":   sEnd.UTC().Format("2006-01-02T15:04:05.000Z"),
+			"entryPath": sEntry,
+			"exitPath":  sExit,
+		}
+	}
+
+	sendTRPCResponse(w, map[string]any{
+		"event":   eventMap,
+		"session": sessMap,
+	})
+}
+
 func (h *Handler) HandleTRPCConversionNames(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	query := fmt.Sprintf(`
@@ -2491,7 +3148,35 @@ func (h *Handler) HandleTRPCChartValues(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	sessions, _, err := h.queryService.GetSessionsList(r.Context(), tenantID, shopID, 50, 0)
+	limit := 50
+	offset := 0
+
+	input := parseTRPCInput(r)
+	if input != nil {
+		if t, ok := input["take"].(float64); ok && t > 0 {
+			limit = int(t)
+		}
+		if c, ok := input["cursor"].(float64); ok && c >= 0 {
+			offset = int(c)
+		}
+	}
+	if lStr := r.URL.Query().Get("take"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+	if cStr := r.URL.Query().Get("cursor"); cStr != "" {
+		if c, err := strconv.Atoi(cStr); err == nil && c >= 0 {
+			offset = c
+		}
+	}
+
+	sessions, total, err := h.queryService.GetSessionsList(r.Context(), tenantID, shopID, limit, offset)
 	if err != nil || sessions == nil {
 		sessions = []domain.Session{}
 	}
@@ -2500,6 +3185,17 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 		entryPath := s.EntryPath
 		if entryPath == "" {
 			entryPath = "/"
+		}
+		exitPath := s.ExitPath
+		if exitPath == "" {
+			exitPath = entryPath
+		}
+		ref := s.ReferrerName
+		if ref == "" {
+			ref = s.Referrer
+		}
+		if ref == "" {
+			ref = "Direct"
 		}
 		items = append(items, map[string]any{
 			"id":              s.ID.String(),
@@ -2510,23 +3206,44 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 			"endedAt":         s.EndedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"duration":        s.Duration * 1000,
 			"entryPath":       entryPath,
-			"exitPath":        s.ExitPath,
+			"exitPath":        exitPath,
 			"referrer":        s.Referrer,
-			"referrerName":    s.ReferrerName,
+			"referrerName":    ref,
 			"referrerType":    s.ReferrerType,
 			"eventCount":      s.EventsCount,
-			"screenViewCount": s.EventsCount,
+			"screenViewCount": s.ScreenViewsCount,
 			"isBounce":        s.EventsCount <= 1,
 			"revenue":         float64(s.TotalRevenue) / 100.0,
+			"country":         s.Country,
+			"city":            s.City,
+			"os":              s.OS,
+			"browser":         s.Browser,
+			"device":          s.Device,
+			"hasCart":         s.HasCartAdd,
+			"hasPurchase":     s.HasPurchase,
 		})
 	}
-	sendTRPCResponse(w, map[string]any{
-		"data":  items,
-		"items": items,
+
+	var nextCursor any = nil
+	if int64(offset+limit) < total {
+		nextCursor = offset + limit
+	}
+
+	resData := map[string]any{
+		"data":     items,
+		"items":    items,
+		"sessions": items,
+		"total":    total,
 		"meta": map[string]any{
-			"next": nil,
+			"next": nextCursor,
 		},
-	})
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/api/v1") {
+		httputil.JSON(w, http.StatusOK, resData)
+	} else {
+		sendTRPCResponse(w, resData)
+	}
 }
 
 func (h *Handler) HandleTRPCDashboardList(w http.ResponseWriter, r *http.Request) {
@@ -2806,24 +3523,52 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 			country, city, path, devType, browser, osStr := "", "", "", "Desktop", "Chrome", "macOS"
 
 			if len(fvals) >= 4 {
-				if fvals[0] != nil { fmt.Sscan(fmt.Sprint(fvals[0]), &views) }
-				if fvals[1] != nil { fmt.Sscan(fmt.Sprint(fvals[1]), &carts) }
-				if fvals[2] != nil { fmt.Sscan(fmt.Sprint(fvals[2]), &firstSeen) }
-				if fvals[3] != nil { fmt.Sscan(fmt.Sprint(fvals[3]), &lastSeen) }
+				if fvals[0] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[0]), &views)
+				}
+				if fvals[1] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[1]), &carts)
+				}
+				if fvals[2] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[2]), &firstSeen)
+				}
+				if fvals[3] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[3]), &lastSeen)
+				}
 			}
 			if len(fvals) >= 8 {
-				if fvals[4] != nil { sessID = fmt.Sprint(fvals[4]) }
-				if fvals[5] != nil { custID = fmt.Sprint(fvals[5]) }
-				if fvals[6] != nil { cartID = fmt.Sprint(fvals[6]) }
-				if fvals[7] != nil { fmt.Sscan(fmt.Sprint(fvals[7]), &cartCents) }
+				if fvals[4] != nil {
+					sessID = fmt.Sprint(fvals[4])
+				}
+				if fvals[5] != nil {
+					custID = fmt.Sprint(fvals[5])
+				}
+				if fvals[6] != nil {
+					cartID = fmt.Sprint(fvals[6])
+				}
+				if fvals[7] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[7]), &cartCents)
+				}
 			}
 			if len(fvals) >= 14 {
-				if fvals[8] != nil && fmt.Sprint(fvals[8]) != "" { country = fmt.Sprint(fvals[8]) }
-				if fvals[9] != nil && fmt.Sprint(fvals[9]) != "" { city = fmt.Sprint(fvals[9]) }
-				if fvals[10] != nil && fmt.Sprint(fvals[10]) != "" { path = fmt.Sprint(fvals[10]) }
-				if fvals[11] != nil && fmt.Sprint(fvals[11]) != "" { devType = fmt.Sprint(fvals[11]) }
-				if fvals[12] != nil && fmt.Sprint(fvals[12]) != "" { browser = fmt.Sprint(fvals[12]) }
-				if fvals[13] != nil && fmt.Sprint(fvals[13]) != "" { osStr = fmt.Sprint(fvals[13]) }
+				if fvals[8] != nil && fmt.Sprint(fvals[8]) != "" {
+					country = fmt.Sprint(fvals[8])
+				}
+				if fvals[9] != nil && fmt.Sprint(fvals[9]) != "" {
+					city = fmt.Sprint(fvals[9])
+				}
+				if fvals[10] != nil && fmt.Sprint(fvals[10]) != "" {
+					path = fmt.Sprint(fvals[10])
+				}
+				if fvals[11] != nil && fmt.Sprint(fvals[11]) != "" {
+					devType = fmt.Sprint(fvals[11])
+				}
+				if fvals[12] != nil && fmt.Sprint(fvals[12]) != "" {
+					browser = fmt.Sprint(fvals[12])
+				}
+				if fvals[13] != nil && fmt.Sprint(fvals[13]) != "" {
+					osStr = fmt.Sprint(fvals[13])
+				}
 			}
 
 			dwell := int64(0)
@@ -3113,6 +3858,54 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract profileId filter if present
+	profileID := ""
+	if input != nil {
+		if pid, ok := input["profileId"].(string); ok && pid != "" {
+			profileID = pid
+		}
+	}
+	if profileID == "" && input != nil {
+		if filtersRaw, ok := input["filters"].([]any); ok {
+			for _, f := range filtersRaw {
+				if fMap, ok := f.(map[string]any); ok {
+					idStr, _ := fMap["id"].(string)
+					nameStr, _ := fMap["name"].(string)
+					if idStr == "profile_id" || nameStr == "profile_id" {
+						if vals, ok := fMap["value"].([]any); ok && len(vals) > 0 {
+							if valStr, ok := vals[0].(string); ok {
+								profileID = valStr
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if profileID == "" && input != nil {
+		if seriesRaw, ok := input["series"].([]any); ok {
+			for _, s := range seriesRaw {
+				if sMap, ok := s.(map[string]any); ok {
+					if filtersRaw, ok := sMap["filters"].([]any); ok {
+						for _, f := range filtersRaw {
+							if fMap, ok := f.(map[string]any); ok {
+								idStr, _ := fMap["id"].(string)
+								nameStr, _ := fMap["name"].(string)
+								if idStr == "profile_id" || nameStr == "profile_id" {
+									if vals, ok := fMap["value"].([]any); ok && len(vals) > 0 {
+										if valStr, ok := vals[0].(string); ok {
+											profileID = valStr
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	breakdownProp := ""
 	if input != nil {
 		if breakdownsRaw, ok := input["breakdowns"].([]any); ok && len(breakdownsRaw) > 0 {
@@ -3145,9 +3938,18 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 		var args []any
 		args = append(args, tenantID, shopID, startTime, endTime)
 
+		if profileID != "" {
+			whereExtra = append(whereExtra, "AND (device_id = ? OR toString(customer_id) = ?)")
+			args = append(args, profileID, profileID)
+		}
+
 		if len(allowedEvents) == 1 {
-			whereExtra = append(whereExtra, "AND name = ?")
-			args = append(args, allowedEvents[0])
+			if allowedEvents[0] == "screen_view" || allowedEvents[0] == "page_view" {
+				whereExtra = append(whereExtra, "AND (name IN ('screen_view', 'page_view') OR (path != '' AND name != 'session_end'))")
+			} else {
+				whereExtra = append(whereExtra, "AND name = ?")
+				args = append(args, allowedEvents[0])
+			}
 		} else if len(allowedEvents) > 1 {
 			placeholders := make([]string, len(allowedEvents))
 			for i, n := range allowedEvents {
@@ -3259,16 +4061,30 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 		dateList = append(dateList, startTime.Truncate(24*time.Hour).Format("2006-01-02T15:04:05.000Z"))
 	}
 
-	isBreakdownByName := (breakdownProp == "name") || len(allowedEvents) > 1
+	timeSeriesBreakdownCol := ""
+	if mapped, ok := validBreakdownCols[breakdownProp]; ok && mapped != "" {
+		timeSeriesBreakdownCol = mapped
+	} else if len(allowedEvents) > 1 {
+		timeSeriesBreakdownCol = "name"
+	}
 
-	if isBreakdownByName {
+	if timeSeriesBreakdownCol != "" {
 		var whereExtra []string
 		var args []any
 		args = append(args, tenantID, shopID, startTime, endTime)
 
+		if profileID != "" {
+			whereExtra = append(whereExtra, "AND (device_id = ? OR toString(customer_id) = ?)")
+			args = append(args, profileID, profileID)
+		}
+
 		if len(allowedEvents) == 1 {
-			whereExtra = append(whereExtra, "AND name = ?")
-			args = append(args, allowedEvents[0])
+			if allowedEvents[0] == "screen_view" || allowedEvents[0] == "page_view" {
+				whereExtra = append(whereExtra, "AND (name IN ('screen_view', 'page_view') OR (path != '' AND name != 'session_end'))")
+			} else {
+				whereExtra = append(whereExtra, "AND name = ?")
+				args = append(args, allowedEvents[0])
+			}
 		} else if len(allowedEvents) > 1 {
 			placeholders := make([]string, len(allowedEvents))
 			for i, n := range allowedEvents {
@@ -3278,43 +4094,59 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 			whereExtra = append(whereExtra, fmt.Sprintf("AND name IN (%s)", strings.Join(placeholders, ",")))
 		}
 
+		if timeSeriesBreakdownCol == "path" {
+			whereExtra = append(whereExtra, "AND path != ''")
+		}
+
 		query := fmt.Sprintf(`
 			SELECT
-				name,
+				%s as val,
 				toStartOfDay(created_at) as dt,
 				count(*) as count
 			FROM %s.events
 			WHERE (tenant_id = ? OR tenant_id = '00000000-0000-0000-0000-000000000000') AND shop_id = ?
 			  AND created_at >= ? AND created_at <= ?
 			  %s
-			GROUP BY name, dt
-			ORDER BY name ASC, dt ASC
-		`, h.queryService.database, strings.Join(whereExtra, " "))
+			GROUP BY val, dt
+			ORDER BY val ASC, dt ASC
+		`, timeSeriesBreakdownCol, h.queryService.database, strings.Join(whereExtra, " "))
 
-		countsByEventAndDate := make(map[string]map[string]uint64)
-		var eventOrder []string
+		countsByValAndDate := make(map[string]map[string]uint64)
+		var valOrder []string
+		valTotals := make(map[string]uint64)
 		if rows, err := h.queryService.Conn().Query(r.Context(), query, args...); err == nil {
 			defer rows.Close()
 			for rows.Next() {
-				var name string
+				var val string
 				var dt time.Time
 				var c uint64
-				if err := rows.Scan(&name, &dt, &c); err == nil {
-					dtStr := dt.UTC().Truncate(24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
-					if _, exists := countsByEventAndDate[name]; !exists {
-						countsByEventAndDate[name] = make(map[string]uint64)
-						eventOrder = append(eventOrder, name)
+				if err := rows.Scan(&val, &dt, &c); err == nil {
+					if val == "" {
+						continue
 					}
-					countsByEventAndDate[name][dtStr] = c
+					dtStr := dt.UTC().Truncate(24 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+					if _, exists := countsByValAndDate[val]; !exists {
+						countsByValAndDate[val] = make(map[string]uint64)
+						valOrder = append(valOrder, val)
+					}
+					countsByValAndDate[val][dtStr] = c
+					valTotals[val] += c
 				}
 			}
+		}
+
+		sort.Slice(valOrder, func(i, j int) bool {
+			return valTotals[valOrder[i]] > valTotals[valOrder[j]]
+		})
+		if len(valOrder) > 10 {
+			valOrder = valOrder[:10]
 		}
 
 		var seriesList []map[string]any
 		var totalSum uint64 = 0
 
-		for _, name := range eventOrder {
-			dateCounts := countsByEventAndDate[name]
+		for _, val := range valOrder {
+			dateCounts := countsByValAndDate[val]
 			var serieSum uint64 = 0
 			var serieMin uint64 = 0
 			var serieMax uint64 = 0
@@ -3342,12 +4174,12 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 			}
 
 			seriesList = append(seriesList, map[string]any{
-				"id":    name,
-				"name":  name,
-				"names": []string{"All events", name},
+				"id":    val,
+				"name":  val,
+				"names": []string{"Events", val},
 				"event": map[string]any{
-					"id":   name,
-					"name": name,
+					"id":   val,
+					"name": val,
 				},
 				"metrics": map[string]any{
 					"sum":     serieSum,
@@ -3359,13 +4191,6 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 				"data": serieData,
 			})
 		}
-
-		// Sort series by sum DESC
-		sort.Slice(seriesList, func(i, j int) bool {
-			sumI := seriesList[i]["metrics"].(map[string]any)["sum"].(uint64)
-			sumJ := seriesList[j]["metrics"].(map[string]any)["sum"].(uint64)
-			return sumI > sumJ
-		})
 
 		globalAvg := float64(0)
 		if len(dateList) > 0 {
@@ -3389,9 +4214,18 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 	var args []any
 	args = append(args, tenantID, shopID, startTime, endTime)
 
+	if profileID != "" {
+		whereExtra = append(whereExtra, "AND (device_id = ? OR toString(customer_id) = ?)")
+		args = append(args, profileID, profileID)
+	}
+
 	if len(allowedEvents) == 1 {
-		whereExtra = append(whereExtra, "AND name = ?")
-		args = append(args, allowedEvents[0])
+		if allowedEvents[0] == "screen_view" || allowedEvents[0] == "page_view" {
+			whereExtra = append(whereExtra, "AND (name IN ('screen_view', 'page_view') OR (path != '' AND name != 'session_end'))")
+		} else {
+			whereExtra = append(whereExtra, "AND name = ?")
+			args = append(args, allowedEvents[0])
+		}
 	} else if len(allowedEvents) > 1 {
 		placeholders := make([]string, len(allowedEvents))
 		for i, n := range allowedEvents {
@@ -4337,11 +5171,7 @@ func (h *Handler) HandleTestMetaIntegration(w http.ResponseWriter, r *http.Reque
 	client := h.getMetaClient()
 	resp, err := client.SendEvents(r.Context(), pixelID, accessToken, testEventCode, []meta.CAPIEvent{testEvent})
 	if err != nil {
-		httputil.JSON(w, http.StatusOK, map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
-			"details": resp,
-		})
+		httputil.Error(w, http.StatusBadRequest, "META_TEST_FAILED", err.Error())
 		return
 	}
 
@@ -4362,3 +5192,44 @@ func maskMetaToken(token string) string {
 	return prefix + strings.Repeat("*", 16) + suffix
 }
 
+// HandleCreateWSToken handles GET & POST /api/v1/auth/ws-token
+func (h *Handler) HandleCreateWSToken(w http.ResponseWriter, r *http.Request) {
+	shopID := r.URL.Query().Get("shop_id")
+	tenantID := r.URL.Query().Get("tenant_id")
+	if shopID == "" && r.Method == http.MethodPost {
+		var payload struct {
+			ShopID   string `json:"shop_id"`
+			TenantID string `json:"tenant_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		shopID = payload.ShopID
+		if tenantID == "" {
+			tenantID = payload.TenantID
+		}
+	}
+
+	if shopID == "" {
+		shopID = r.Header.Get("X-Shop-ID")
+	}
+	if tenantID == "" {
+		tenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	if shopID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id parameter is required")
+		return
+	}
+
+	// 60 seconds TTL for WebSocket handshake
+	token, err := GenerateWSToken(shopID, tenantID, 60*time.Second)
+	if err != nil {
+		httputil.Error(w, http.StatusInternalServerError, "TOKEN_GEN_FAILED", "Failed to generate WebSocket token: "+err.Error())
+		return
+	}
+
+	httputil.JSON(w, http.StatusOK, map[string]interface{}{
+		"token":      token,
+		"expires_in": 60,
+		"shop_id":    shopID,
+	})
+}

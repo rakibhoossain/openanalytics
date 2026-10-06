@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"openanalytics/internal/domain"
 	"openanalytics/pkg/uuidv7"
+
+	"github.com/google/uuid"
 )
 
 func TestService_GetLiveVisitors(t *testing.T) {
@@ -86,8 +87,8 @@ func TestService_GetUserJourney(t *testing.T) {
 	}
 	defer svc.Close()
 
-	tenantID := uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	shopID := uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000002")
+	tenantID := uuid.MustParse("019f5bfa-f6e4-76c0-9929-ed0daba7b14b")
+	shopID := uuid.MustParse("019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1")
 
 	journey, err := svc.GetUserJourney(ctx, tenantID, shopID, "all", "", "", 5)
 	if err != nil {
@@ -106,4 +107,3 @@ func TestService_GetUserJourney(t *testing.T) {
 		t.Logf("Link: %s -> %s (value=%d)", l.Source, l.Target, l.Value)
 	}
 }
-

@@ -10,8 +10,8 @@ const INGEST_BASE = window.OPENANALYTICS_INGEST_URL || (window.location.host ? '
 // Application State
 const state = {
   activeView: 'overview',
-  tenantId: '018e69d0-7a89-7000-8b1a-200000000001',
-  shopId: '018e69d0-7a89-7000-8b1a-200000000002',
+  tenantId: '019f5bfa-f6e4-76c0-9929-ed0daba7b14b',
+  shopId: '019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1',
   timeRange: '7d',
   currentMetric: 'page_views',
   liveInterval: null,
@@ -52,50 +52,50 @@ const el = {
   pageViews: document.querySelectorAll('.page-view'),
   headlineTitle: document.getElementById('page-headline-title'),
   headlineDesc: document.getElementById('page-headline-desc'),
-  
+
   // Controls
   tenantInput: document.getElementById('tenant-input'),
   shopInput: document.getElementById('shop-input'),
   timeRangePicker: document.getElementById('time-range-picker'),
   btnRefresh: document.getElementById('btn-refresh'),
-  
+
   // Overview KPIs
   kpiRevenue: document.getElementById('kpi-revenue'),
   kpiVisitors: document.getElementById('kpi-visitors'),
   kpiCartAdds: document.getElementById('kpi-cart-adds'),
   kpiConversion: document.getElementById('kpi-conversion'),
-  
+
   // Trends & Funnel Preview
   trendsBars: document.getElementById('trends-bars'),
   metricSelectorGroup: document.querySelector('.metric-selector-group'),
   funnelDisplay: document.getElementById('funnel-display'),
-  
+
   // Funnels Deep Dive Page
   funnelDisplayFull: document.getElementById('funnel-display-full'),
   funnelStatOverall: document.getElementById('funnel-stat-overall'),
   funnelStatDropoff: document.getElementById('funnel-stat-dropoff'),
   funnelStatTotal: document.getElementById('funnel-stat-total'),
-  
+
   // Live Radar Hero & Page
   liveBigCount: document.getElementById('live-big-count'),
   livePageDevices: document.getElementById('live-page-devices'),
   livePageGeos: document.getElementById('live-page-geos'),
   livePagePaths: document.getElementById('live-page-paths'),
-  
+
   // ML Intent Page
   mlPageIntentRows: document.getElementById('ml-page-intent-rows'),
-  
+
   // Shopper Journey Timeline
   shopperSearchInput: document.getElementById('shopper-search-input'),
   btnInspect: document.getElementById('btn-inspect'),
   shopperTimeline: document.getElementById('shopper-timeline'),
-  
+
   // Event Test Lab / Simulator
   presetBuyerFlow: document.getElementById('preset-buyer-flow'),
   presetAbandonFlow: document.getElementById('preset-abandon-flow'),
   presetGoogleSearch: document.getElementById('preset-google-search'),
   presetBotTraffic: document.getElementById('preset-bot-traffic'),
-  
+
   simEventForm: document.getElementById('sim-event-form'),
   simEventName: document.getElementById('sim-event-name'),
   simDeviceId: document.getElementById('sim-device-id'),
@@ -107,7 +107,7 @@ const el = {
   simRevenue: document.getElementById('sim-revenue'),
   simCurrency: document.getElementById('sim-currency'),
   simProperties: document.getElementById('sim-properties'),
-  
+
   btnSendSingle: document.getElementById('btn-send-single'),
   btnSendBatch: document.getElementById('btn-send-batch'),
   btnToggleAuto: document.getElementById('btn-toggle-auto'),
@@ -147,14 +147,14 @@ const viewMeta = {
 function init() {
   bindEvents();
   syncInputs();
-  
+
   // Parse initial route from URL hash
   const initialHash = window.location.hash.replace('#', '') || 'overview';
   switchView(initialHash);
 
   // Initial data fetch
   loadAllData();
-  
+
   // Real-time telemetry heartbeat & live views refresh (every 3 seconds)
   state.liveInterval = setInterval(() => {
     fetchLiveRadar();
@@ -493,7 +493,7 @@ async function loadTrends() {
   if (!el.trendsBars) return;
   el.trendsBars.innerHTML = '<div style="color: var(--text-subtle); margin: auto;">Loading time series...</div>';
   const res = await fetchAPI(`/api/v1/query/trends?metric=${state.currentMetric}&time_range=${state.timeRange}`);
-  
+
   const points = res?.data?.data || [];
   if (points.length === 0) {
     renderEmptyTrends();
@@ -504,7 +504,7 @@ async function loadTrends() {
   el.trendsBars.innerHTML = points.map(p => {
     const heightPercent = Math.max((p.value / maxVal) * 100, 6);
     const label = formatBucketLabel(p.timestamp);
-    const formattedVal = state.currentMetric === 'revenue' 
+    const formattedVal = state.currentMetric === 'revenue'
       ? formatCentsToCurrency(p.value || 0)
       : (p.value || 0).toLocaleString();
 
@@ -562,10 +562,10 @@ async function loadFunnel() {
   let maxDrop = 0;
   let dropStage = 'Cart -> Checkout';
   for (let i = 0; i < funnel.steps.length - 1; i++) {
-    const diff = (funnel.steps[i].count || 0) - (funnel.steps[i+1].count || 0);
+    const diff = (funnel.steps[i].count || 0) - (funnel.steps[i + 1].count || 0);
     if (diff > maxDrop) {
       maxDrop = diff;
-      dropStage = `${formatStepName(funnel.steps[i].name)} -> ${formatStepName(funnel.steps[i+1].name)}`;
+      dropStage = `${formatStepName(funnel.steps[i].name)} -> ${formatStepName(funnel.steps[i + 1].name)}`;
     }
   }
   if (el.funnelStatDropoff) el.funnelStatDropoff.textContent = dropStage;
@@ -707,7 +707,7 @@ async function inspectShopper(identifier) {
   if (!el.shopperTimeline) return;
   el.shopperTimeline.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-subtle);">Querying ClickHouse unified clickstream...</div>';
   const res = await fetchAPI(`/api/v1/query/shopper/${encodeURIComponent(identifier)}`);
-  
+
   const journey = res?.data || res;
   if (!journey || !journey.events || journey.events.length === 0) {
     el.shopperTimeline.innerHTML = `<div class="timeline-empty-state">No events recorded yet for shopper "${escapeHtml(identifier)}". Dispatch events from the Event Test Lab to view timeline.</div>`;

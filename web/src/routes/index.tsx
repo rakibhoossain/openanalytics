@@ -6,8 +6,8 @@ export const Route = createFileRoute('/')({
     throw redirect({
       to: '/$tenantId/$shopId',
       params: {
-        tenantId: '018e69d0-7a89-7000-8b1a-200000000001',
-        shopId: '018e69d0-7a89-7000-8b1a-200000000002',
+        tenantId: '019f5bfa-f6e4-76c0-9929-ed0daba7b14b',
+        shopId: '019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1',
       } as any,
     });
   },

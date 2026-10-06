@@ -586,18 +586,6 @@ func (h *Handler) resolveTenantID(r *http.Request, req *TrackRequest) uuid.UUID 
 			return id
 		}
 	}
-	if req.ShopID == "018e69d0-7a89-7000-8b1a-200000000002" || req.ClientID == "018e69d0-7a89-7000-8b1a-200000000002" {
-		return uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	}
-	if hdr := r.Header.Get("X-Shop-Id"); hdr == "018e69d0-7a89-7000-8b1a-200000000002" {
-		return uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	}
-	if hdr := r.Header.Get("openpanel-client-id"); hdr == "018e69d0-7a89-7000-8b1a-200000000002" {
-		return uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	}
-	if hdr := r.Header.Get("openanalytics-client-id"); hdr == "018e69d0-7a89-7000-8b1a-200000000002" {
-		return uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
-	}
 	return uuid.Nil
 }
 
@@ -789,9 +777,6 @@ func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []by
 		if tid, err := uuid.Parse(tenantIDStr); err == nil {
 			tenantID = tid
 		}
-	}
-	if tenantID == uuid.Nil && (shopID.String() == "018e69d0-7a89-7000-8b1a-200000000002" || payload.ShopID == "018e69d0-7a89-7000-8b1a-200000000002") {
-		tenantID = uuid.MustParse("018e69d0-7a89-7000-8b1a-200000000001")
 	}
 
 	startedAt := h.resolveTimestamp(payload.StartedAt)
@@ -997,4 +982,3 @@ func enrichCommerceProperties(enrichedProps map[string]string, req *TrackRequest
 		enrichedProps["transaction_id"] = req.TransactionID
 	}
 }
-
