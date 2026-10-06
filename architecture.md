@@ -97,7 +97,7 @@ All core infrastructure services are verified and operational:
 │                                                                                           │
 │   • Middleware: chi/middleware (Auth, TenantContext, Timeout, Compression, Logger)        │
 │   • Endpoints: Funnels, Retention, Trends, Realtime Live Shoppers, User Journeys          │
-│   • Authenticated via `ai-cart` Tenant JWT (Injected `X-Tenant-Id`, `X-Shop-Id`)          │
+│   • Authenticated via `ai-cart` Tenant JWT (Injected `X-Tenant-ID`, `X-Shop-ID`)          │
 │   • Reads OLAP aggregations from ClickHouse (9000)                                        │
 │   • Reads & Writes Dashboard / Report / Chart metadata from PostgreSQL (5432)            │
 │   • Reads Real-time Live Shopper metrics from Redis (6379)                                │
@@ -132,7 +132,7 @@ r.Use(middleware.Timeout(5 * time.Second))
 r.Use(cors.Handler(cors.Options{
     AllowedOrigins:   []string{"*"},
     AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-    AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-Id", "X-Tenant-Id"},
+    AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID"},
     AllowCredentials: false,
     MaxAge:           86400 * 7,
 }))

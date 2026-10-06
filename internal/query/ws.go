@@ -236,55 +236,47 @@ func (c *Client) writePump() {
 	}
 }
 
-// extractTargetIDs extracts shopID and tenantID from path or query params.
+// extractTargetIDs extracts optional shopID and tenantID from URL path params.
 func extractTargetIDs(r *http.Request) (string, string) {
-	// 1. Path param from Chi: {shopId}, {projectId}, {organizationId}, {tenantId}
 	shopID := chi.URLParam(r, "shopId")
-	if shopID == "" {
-		shopID = chi.URLParam(r, "projectId")
-	}
 	tenantID := chi.URLParam(r, "tenantId")
-	if tenantID == "" {
-		tenantID = chi.URLParam(r, "organizationId")
-	}
-
-	// 2. Query param fallbacks
-	if shopID == "" {
-		shopID = r.URL.Query().Get("shopId")
-		if shopID == "" {
-			shopID = r.URL.Query().Get("projectId")
-		}
-	}
-	if tenantID == "" {
-		tenantID = r.URL.Query().Get("tenantId")
-		if tenantID == "" {
-			tenantID = r.URL.Query().Get("organizationId")
-		}
-	}
-
 	return shopID, tenantID
 }
 
-// checkWSAuth validates the token query parameter against the target ID.
-func checkWSAuth(w http.ResponseWriter, r *http.Request, targetID string) bool {
-	if targetID == "" {
-		http.Error(w, "Unauthorized: missing shop/tenant id", http.StatusBadRequest)
-		return false
-	}
+// resolveWSTargets extracts and validates targets directly from the JWT token and optional path params.
+func resolveWSTargets(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	token := r.URL.Query().Get("token")
-	if _, err := ValidateWSToken(token, targetID); err != nil {
-		log.Printf("[WebSocket] Rejecting unauthorized connection for %s: %v", targetID, err)
-		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
-		return false
+	if token == "" {
+		http.Error(w, "Unauthorized: missing websocket token", http.StatusUnauthorized)
+		return "", "", false
 	}
-	return true
+
+	pathShopID, pathTenantID := extractTargetIDs(r)
+
+	// Validate token. If pathShopID is set, enforces match. If pathShopID is empty, validates signature and returns token claims.
+	claims, err := ValidateWSToken(token, pathShopID)
+	if err != nil {
+		log.Printf("[WebSocket] Rejecting unauthorized connection: %v", err)
+		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+		return "", "", false
+	}
+
+	shopID := pathShopID
+	if shopID == "" {
+		shopID = claims.ShopID
+	}
+	tenantID := pathTenantID
+	if tenantID == "" {
+		tenantID = claims.TenantID
+	}
+
+	return shopID, tenantID, true
 }
 
-// ServeLiveVisitors handles GET /live/visitors/{shopId} WebSocket upgrade.
+// ServeLiveVisitors handles GET /live/visitors WebSocket upgrade.
 func (h *WebSocketHub) ServeLiveVisitors(w http.ResponseWriter, r *http.Request) {
-	shopID, tenantID := extractTargetIDs(r)
-
-	if !checkWSAuth(w, r, shopID) {
+	shopID, tenantID, ok := resolveWSTargets(w, r)
+	if !ok {
 		return
 	}
 
@@ -327,11 +319,10 @@ func (h *WebSocketHub) ServeLiveVisitors(w http.ResponseWriter, r *http.Request)
 	go client.readPump()
 }
 
-// ServeLiveEvents handles GET /live/events/{shopId} WebSocket upgrade.
+// ServeLiveEvents handles GET /live/events WebSocket upgrade.
 func (h *WebSocketHub) ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
-	shopID, tenantID := extractTargetIDs(r)
-
-	if !checkWSAuth(w, r, shopID) {
+	shopID, tenantID, ok := resolveWSTargets(w, r)
+	if !ok {
 		return
 	}
 
@@ -348,62 +339,6 @@ func (h *WebSocketHub) ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 		tenantID: tenantID,
 		shopID:   shopID,
 		topic:    "events",
-	}
-	h.register <- client
-
-	go client.writePump()
-	go client.readPump()
-}
-
-// ServeLiveNotifications handles GET /live/notifications/{shopId} WebSocket upgrade.
-func (h *WebSocketHub) ServeLiveNotifications(w http.ResponseWriter, r *http.Request) {
-	shopID, tenantID := extractTargetIDs(r)
-
-	if !checkWSAuth(w, r, shopID) {
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[WebSocket] Upgrade notifications failed: %v", err)
-		return
-	}
-
-	client := &Client{
-		hub:      h,
-		conn:     conn,
-		send:     make(chan []byte, 256),
-		tenantID: tenantID,
-		shopID:   shopID,
-		topic:    "notifications",
-	}
-	h.register <- client
-
-	go client.writePump()
-	go client.readPump()
-}
-
-// ServeLiveOrganization handles GET /live/organization/{tenantId} WebSocket upgrade.
-func (h *WebSocketHub) ServeLiveOrganization(w http.ResponseWriter, r *http.Request) {
-	_, tenantID := extractTargetIDs(r)
-
-	if !checkWSAuth(w, r, tenantID) {
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("[WebSocket] Upgrade organization failed: %v", err)
-		return
-	}
-
-	client := &Client{
-		hub:      h,
-		conn:     conn,
-		send:     make(chan []byte, 256),
-		tenantID: tenantID,
-		shopID:   tenantID,
-		topic:    "organization",
 	}
 	h.register <- client
 

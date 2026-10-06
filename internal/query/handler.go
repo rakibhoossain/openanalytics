@@ -68,14 +68,11 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	// Live WebSocket routes for real-time UI streaming
 	if h.wsHub != nil {
 		mountLive := func(r chi.Router) {
-			r.Get("/visitors/{projectId}", h.wsHub.ServeLiveVisitors)
+			r.Get("/visitors", h.wsHub.ServeLiveVisitors)
 			r.Get("/visitors/{shopId}", h.wsHub.ServeLiveVisitors)
-			r.Get("/events/{projectId}", h.wsHub.ServeLiveEvents)
+
+			r.Get("/events", h.wsHub.ServeLiveEvents)
 			r.Get("/events/{shopId}", h.wsHub.ServeLiveEvents)
-			r.Get("/notifications/{projectId}", h.wsHub.ServeLiveNotifications)
-			r.Get("/notifications/{shopId}", h.wsHub.ServeLiveNotifications)
-			r.Get("/organization/{organizationId}", h.wsHub.ServeLiveOrganization)
-			r.Get("/organization/{tenantId}", h.wsHub.ServeLiveOrganization)
 		}
 		r.Route("/live", mountLive)
 		r.Route("/api/live", mountLive)
@@ -562,63 +559,24 @@ func roundVal(val float64, precision int) float64 {
 	return math.Round(val*pow) / pow
 }
 
-// Helper: extract tenant_id and shop_id from headers, query parameters, or tRPC input.
+// Helper: extract tenant_id and shop_id strictly from headers.
 func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, error) {
-	tStr := r.Header.Get("X-Tenant-ID")
-	if tStr == "" {
-		tStr = r.URL.Query().Get("tenant_id")
-	}
-	if tStr == "" {
-		tStr = r.URL.Query().Get("tenantId")
-	}
-	if tStr == "" {
-		tStr = r.URL.Query().Get("organizationId")
-	}
-
 	sStr := r.Header.Get("X-Shop-ID")
 	if sStr == "" {
-		sStr = r.URL.Query().Get("shop_id")
-	}
-	if sStr == "" {
-		sStr = r.URL.Query().Get("shopId")
-	}
-	if sStr == "" {
-		sStr = r.URL.Query().Get("projectId")
-	}
-
-	input := parseTRPCInput(r)
-	if input != nil {
-		if tVal, ok := input["tenantId"].(string); ok && tVal != "" {
-			tStr = tVal
-		} else if tVal, ok := input["organizationId"].(string); ok && tVal != "" {
-			tStr = tVal
-		}
-		if sVal, ok := input["shopId"].(string); ok && sVal != "" {
-			sStr = sVal
-		} else if sVal, ok := input["projectId"].(string); ok && sVal != "" {
-			sStr = sVal
-		}
-	}
-
-	if sStr == "" || sStr == "default" || sStr == "undefined" {
-		return uuid.Nil, uuid.Nil, errors.New("missing or invalid shop_id")
+		return uuid.Nil, uuid.Nil, errors.New("missing required X-Shop-ID header")
 	}
 	shopID, err := uuid.Parse(sStr)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid shop_id: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid X-Shop-ID header: %w", err)
 	}
 
-	var tenantID uuid.UUID
-	if tStr != "" && tStr != "default" && tStr != "undefined" {
-		tenantID, err = uuid.Parse(tStr)
-		if err != nil {
-			return uuid.Nil, uuid.Nil, fmt.Errorf("invalid tenant_id: %w", err)
-		}
+	tStr := r.Header.Get("X-Tenant-ID")
+	if tStr == "" {
+		return uuid.Nil, uuid.Nil, errors.New("missing required X-Tenant-ID header")
 	}
-
-	// If tenantID was not explicitly specified by client, dynamically resolve from database for this shopID
-	if tenantID == uuid.Nil {
-		tenantID = h.resolveTenantForShop(r.Context(), shopID)
+	tenantID, err := uuid.Parse(tStr)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid X-Tenant-ID header: %w", err)
 	}
 
 	return tenantID, shopID, nil
@@ -662,14 +620,15 @@ func (h *Handler) HandleIntents(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetInsights returns pre-computed automated anomaly and intelligence cards for the UI.
 func (h *Handler) HandleGetInsights(w http.ResponseWriter, r *http.Request) {
-	shopIDStr := r.URL.Query().Get("shop_id")
+	shopIDStr := r.Header.Get("X-Shop-ID")
 	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("X-Shop-Id")
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
+		return
 	}
 
 	shopID, err := uuid.Parse(shopIDStr)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id UUID is required")
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid X-Shop-ID UUID is required")
 		return
 	}
 
@@ -4945,14 +4904,11 @@ func (h *Handler) getMetaClient() *meta.Client {
 	return h.metaClient
 }
 
-// HandleGetMetaIntegration handles GET /api/v1/integrations/meta?shop_id={shopId}
+// HandleGetMetaIntegration handles GET /api/v1/integrations/meta
 func (h *Handler) HandleGetMetaIntegration(w http.ResponseWriter, r *http.Request) {
-	shopIDStr := r.URL.Query().Get("shop_id")
+	shopIDStr := r.Header.Get("X-Shop-ID")
 	if shopIDStr == "" {
-		shopIDStr = r.URL.Query().Get("shopId")
-	}
-	if shopIDStr == "" {
-		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id query parameter is required")
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
 		return
 	}
 	shopID, err := uuid.Parse(shopIDStr)
@@ -5023,7 +4979,14 @@ func (h *Handler) HandleSaveMetaIntegration(w http.ResponseWriter, r *http.Reque
 	}
 
 	if payload.ShopID == "" {
-		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id is required")
+		payload.ShopID = r.Header.Get("X-Shop-ID")
+	}
+	if payload.TenantID == "" {
+		payload.TenantID = r.Header.Get("X-Tenant-ID")
+	}
+
+	if payload.ShopID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header (or shop_id) is required")
 		return
 	}
 	shopID, err := uuid.Parse(payload.ShopID)
@@ -5110,6 +5073,10 @@ func (h *Handler) HandleTestMetaIntegration(w http.ResponseWriter, r *http.Reque
 	accessToken := strings.TrimSpace(payload.AccessToken)
 	testEventCode := strings.TrimSpace(payload.TestEventCode)
 
+	if payload.ShopID == "" {
+		payload.ShopID = r.Header.Get("X-Shop-ID")
+	}
+
 	repo := h.getMetaRepo()
 	if payload.ShopID != "" {
 		if shopUUID, err := uuid.Parse(payload.ShopID); err == nil {
@@ -5194,29 +5161,15 @@ func maskMetaToken(token string) string {
 
 // HandleCreateWSToken handles GET & POST /api/v1/auth/ws-token
 func (h *Handler) HandleCreateWSToken(w http.ResponseWriter, r *http.Request) {
-	shopID := r.URL.Query().Get("shop_id")
-	tenantID := r.URL.Query().Get("tenant_id")
-	if shopID == "" && r.Method == http.MethodPost {
-		var payload struct {
-			ShopID   string `json:"shop_id"`
-			TenantID string `json:"tenant_id"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&payload)
-		shopID = payload.ShopID
-		if tenantID == "" {
-			tenantID = payload.TenantID
-		}
+	shopID := r.Header.Get("X-Shop-ID")
+	if shopID == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
+		return
 	}
 
-	if shopID == "" {
-		shopID = r.Header.Get("X-Shop-ID")
-	}
+	tenantID := r.Header.Get("X-Tenant-ID")
 	if tenantID == "" {
-		tenantID = r.Header.Get("X-Tenant-ID")
-	}
-
-	if shopID == "" {
-		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "shop_id parameter is required")
+		httputil.Error(w, http.StatusBadRequest, "MISSING_TENANT_ID", "X-Tenant-ID header is required")
 		return
 	}
 
@@ -5231,5 +5184,6 @@ func (h *Handler) HandleCreateWSToken(w http.ResponseWriter, r *http.Request) {
 		"token":      token,
 		"expires_in": 60,
 		"shop_id":    shopID,
+		"tenant_id":  tenantID,
 	})
 }

@@ -522,17 +522,15 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 // HandleDeviceID handles GET /api/v1/track/device-id.
 func (h *Handler) HandleDeviceID(w http.ResponseWriter, r *http.Request) {
-	shopIDStr := r.URL.Query().Get("shop_id")
+	shopIDStr := r.Header.Get("X-Shop-ID")
 	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("X-Shop-Id")
-	}
-	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("openpanel-client-id")
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
+		return
 	}
 
 	shopID, err := uuid.Parse(shopIDStr)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id is required")
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id is required: "+err.Error())
 		return
 	}
 
@@ -563,13 +561,7 @@ func (h *Handler) resolveShopID(r *http.Request, req *TrackRequest) (uuid.UUID, 
 	if req.ClientID != "" {
 		return uuid.Parse(req.ClientID)
 	}
-	if hdr := r.Header.Get("X-Shop-Id"); hdr != "" {
-		return uuid.Parse(hdr)
-	}
-	if hdr := r.Header.Get("openpanel-client-id"); hdr != "" {
-		return uuid.Parse(hdr)
-	}
-	if hdr := r.Header.Get("openanalytics-client-id"); hdr != "" {
+	if hdr := r.Header.Get("X-Shop-ID"); hdr != "" {
 		return uuid.Parse(hdr)
 	}
 	return uuid.Nil, http.ErrNoCookie
@@ -581,7 +573,7 @@ func (h *Handler) resolveTenantID(r *http.Request, req *TrackRequest) uuid.UUID 
 			return id
 		}
 	}
-	if hdr := r.Header.Get("X-Tenant-Id"); hdr != "" {
+	if hdr := r.Header.Get("X-Tenant-ID"); hdr != "" {
 		if id, err := uuid.Parse(hdr); err == nil {
 			return id
 		}
@@ -750,16 +742,10 @@ func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []by
 
 	shopIDStr := payload.ShopID
 	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("X-Shop-Id")
+		shopIDStr = r.Header.Get("X-Shop-ID")
 	}
 	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("openpanel-client-id")
-	}
-	if shopIDStr == "" {
-		shopIDStr = r.Header.Get("openanalytics-client-id")
-	}
-	if shopIDStr == "" {
-		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "shop_id is required")
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "X-Shop-ID is required")
 		return
 	}
 	shopID, err := uuid.Parse(shopIDStr)
@@ -770,7 +756,7 @@ func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []by
 
 	tenantIDStr := payload.TenantID
 	if tenantIDStr == "" {
-		tenantIDStr = r.Header.Get("X-Tenant-Id")
+		tenantIDStr = r.Header.Get("X-Tenant-ID")
 	}
 	var tenantID uuid.UUID
 	if tenantIDStr != "" {

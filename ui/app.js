@@ -10,8 +10,9 @@ const INGEST_BASE = window.OPENANALYTICS_INGEST_URL || (window.location.host ? '
 // Application State
 const state = {
   activeView: 'overview',
-  tenantId: '019f5bfa-f6e4-76c0-9929-ed0daba7b14b',
-  shopId: '019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1',
+  tenantId: localStorage.getItem('op_tenant_id') || '019f5bfa-f6e4-76c0-9929-ed0daba7b14b',
+  shopId: localStorage.getItem('op_shop_id') || '019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1',
+  currency: localStorage.getItem('op_currency') || 'BDT',
   timeRange: '7d',
   currentMetric: 'page_views',
   liveInterval: null,
@@ -19,29 +20,20 @@ const state = {
   autoStreamActive: false,
 };
 
-// Global Intl Currency Formatter for Exact Cents -> Decimal Display
-const defaultCurrencyFormatter = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2
-});
-
-function formatCentsToCurrency(cents, currency = 'USD') {
+// Global Intl Currency Formatter for Multi-Currency Display
+function formatCentsToCurrency(cents, currency) {
   if (cents === null || cents === undefined || isNaN(cents)) return '$0.00';
   const decimalVal = Number(cents) / 100;
-  if (!currency || currency === 'USD') {
-    return defaultCurrencyFormatter.format(decimalVal);
-  }
+  const currCode = (currency || state.currency || 'BDT').toUpperCase();
   try {
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
-      currency: currency,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
+      currency: currCode,
+      minimumFractionDigits: currCode === 'JPY' ? 0 : 2,
+      maximumFractionDigits: currCode === 'JPY' ? 0 : 2
     }).format(decimalVal);
   } catch (e) {
-    return `$${decimalVal.toFixed(2)}`;
+    return `${currCode} ${decimalVal.toFixed(2)}`;
   }
 }
 
@@ -56,6 +48,7 @@ const el = {
   // Controls
   tenantInput: document.getElementById('tenant-input'),
   shopInput: document.getElementById('shop-input'),
+  currencySelect: document.getElementById('currency-select'),
   timeRangePicker: document.getElementById('time-range-picker'),
   btnRefresh: document.getElementById('btn-refresh'),
 
@@ -146,6 +139,10 @@ const viewMeta = {
 // Initialize Application
 function init() {
   bindEvents();
+  if (el.tenantInput && state.tenantId) el.tenantInput.value = state.tenantId;
+  if (el.shopInput && state.shopId) el.shopInput.value = state.shopId;
+  if (el.currencySelect && state.currency) el.currencySelect.value = state.currency;
+  if (el.simCurrency && state.currency) el.simCurrency.value = state.currency;
   syncInputs();
 
   // Parse initial route from URL hash
@@ -165,8 +162,21 @@ function init() {
 }
 
 function syncInputs() {
-  if (el.tenantInput) state.tenantId = el.tenantInput.value.trim();
-  if (el.shopInput) state.shopId = el.shopInput.value.trim();
+  if (el.tenantInput) {
+    state.tenantId = el.tenantInput.value.trim();
+    localStorage.setItem('op_tenant_id', state.tenantId);
+  }
+  if (el.shopInput) {
+    state.shopId = el.shopInput.value.trim();
+    localStorage.setItem('op_shop_id', state.shopId);
+  }
+  if (el.currencySelect) {
+    state.currency = el.currencySelect.value.trim().toUpperCase();
+    localStorage.setItem('op_currency', state.currency);
+  }
+  if (el.simCurrency) {
+    el.simCurrency.value = state.currency;
+  }
 }
 
 function switchView(viewName) {
@@ -238,8 +248,30 @@ function bindEvents() {
     logConsole('info', `Refreshed telemetry data for Tenant: ${state.tenantId.substring(0, 8)}... Shop: ${state.shopId.substring(0, 8)}...`);
   });
 
-  el.tenantInput?.addEventListener('change', syncInputs);
-  el.shopInput?.addEventListener('change', syncInputs);
+  el.tenantInput?.addEventListener('change', () => {
+    syncInputs();
+    loadAllData();
+  });
+  el.shopInput?.addEventListener('change', () => {
+    syncInputs();
+    loadAllData();
+  });
+  el.currencySelect?.addEventListener('change', (e) => {
+    state.currency = e.target.value.trim().toUpperCase();
+    localStorage.setItem('op_currency', state.currency);
+    if (el.simCurrency) el.simCurrency.value = state.currency;
+    if (el.kpiRevenue) loadKPISummaries();
+    if (state.currentMetric === 'revenue') loadTrends();
+    logConsole('info', `Shop active currency changed to: ${state.currency}`);
+  });
+  el.simCurrency?.addEventListener('change', (e) => {
+    state.currency = e.target.value.trim().toUpperCase();
+    localStorage.setItem('op_currency', state.currency);
+    if (el.currencySelect) el.currencySelect.value = state.currency;
+    if (el.kpiRevenue) loadKPISummaries();
+    if (state.currentMetric === 'revenue') loadTrends();
+    logConsole('info', `Event Test Lab currency changed to: ${state.currency}`);
+  });
 
   // Time Range Filter
   el.timeRangePicker?.addEventListener('click', (e) => {
@@ -468,7 +500,7 @@ async function loadKPISummaries() {
     totalRev = revRes.data.data.reduce((sum, pt) => sum + (pt.value || 0), 0);
   }
   if (el.kpiRevenue) {
-    el.kpiRevenue.textContent = formatCentsToCurrency(totalRev);
+    el.kpiRevenue.textContent = formatCentsToCurrency(totalRev, state.currency);
   }
 
   let totalVisitors = 0;
@@ -505,7 +537,7 @@ async function loadTrends() {
     const heightPercent = Math.max((p.value / maxVal) * 100, 6);
     const label = formatBucketLabel(p.timestamp);
     const formattedVal = state.currentMetric === 'revenue'
-      ? formatCentsToCurrency(p.value || 0)
+      ? formatCentsToCurrency(p.value || 0, state.currency)
       : (p.value || 0).toLocaleString();
 
     return `
@@ -748,6 +780,9 @@ function getFormEventPayload() {
 
   const revenueVal = parseInt(el.simRevenue?.value, 10);
 
+  const cur = (el.simCurrency?.value || el.currencySelect?.value || state.currency || 'BDT').toUpperCase();
+  state.currency = cur;
+
   return {
     tenant_id: state.tenantId,
     shop_id: state.shopId,
@@ -759,7 +794,7 @@ function getFormEventPayload() {
     path: el.simPath?.value || '/products/item-101',
     product_id: el.simProductId?.value || '',
     revenue: !isNaN(revenueVal) && revenueVal > 0 ? revenueVal : undefined,
-    currency: el.simCurrency?.value || 'USD',
+    currency: cur,
     properties: properties,
     timestamp: Date.now()
   };
@@ -787,6 +822,7 @@ async function handleSendBatchEvents() {
         user_agent: ua,
         path: '/collections/featured-sale',
         referrer: 'https://www.google.com/',
+        currency: state.currency || 'BDT',
         timestamp: Date.now() - 4000
       },
       {
@@ -798,6 +834,7 @@ async function handleSendBatchEvents() {
         user_agent: ua,
         path: '/products/leather-jacket',
         product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+        currency: state.currency || 'BDT',
         timestamp: Date.now() - 3000
       },
       {
@@ -811,7 +848,7 @@ async function handleSendBatchEvents() {
         product_id: '018e69d0-7a89-7000-8b1a-200000000099',
         cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
         revenue: 14999,
-        currency: 'USD',
+        currency: state.currency || 'USD',
         timestamp: Date.now() - 2000
       },
       {
@@ -825,7 +862,7 @@ async function handleSendBatchEvents() {
         product_id: '018e69d0-7a89-7000-8b1a-200000000099',
         cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
         revenue: 14999,
-        currency: 'USD',
+        currency: state.currency || 'USD',
         timestamp: Date.now() - 1000
       },
       {
@@ -840,7 +877,7 @@ async function handleSendBatchEvents() {
         cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
         order_id: '018e69d0-7a89-7000-8b1a-200000000088',
         revenue: 14999,
-        currency: 'USD',
+        currency: state.currency || 'BDT',
         timestamp: Date.now()
       }
     ]
@@ -885,7 +922,7 @@ function toggleAutoStream() {
         path: `/products/${p}`,
         product_id: `prod-${p}`,
         revenue: eventName === 'purchase' ? Math.floor(40 + Math.random() * 160) : undefined,
-        currency: 'USD',
+        currency: state.currency || 'BDT',
         timestamp: Date.now()
       };
 
@@ -916,6 +953,7 @@ async function runBuyerFlowPreset() {
     user_agent: ua,
     path: '/collections/trending',
     referrer: 'https://www.google.com/',
+    currency: state.currency || 'BDT',
     timestamp: Date.now() - 3000
   });
 
@@ -929,6 +967,7 @@ async function runBuyerFlowPreset() {
     user_agent: ua,
     path: '/products/premium-leather-jacket',
     product_id: '018e69d0-7a89-7000-8b1a-200000000099',
+    currency: state.currency || 'BDT',
     timestamp: Date.now() - 2000
   });
 
@@ -944,7 +983,7 @@ async function runBuyerFlowPreset() {
     product_id: '018e69d0-7a89-7000-8b1a-200000000099',
     cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
     revenue: 14999,
-    currency: 'USD',
+    currency: state.currency || 'BDT',
     timestamp: Date.now() - 1000
   });
 
@@ -961,7 +1000,7 @@ async function runBuyerFlowPreset() {
     cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
     order_id: '018e69d0-7a89-7000-8b1a-200000000088',
     revenue: 14999,
-    currency: 'USD',
+    currency: state.currency || 'BDT',
     timestamp: Date.now()
   });
 
@@ -1008,7 +1047,7 @@ async function runAbandonFlowPreset() {
     product_id: sneakerUUIDs[2],
     cart_id: '018e69d0-7a89-7000-8b1a-200000000077',
     revenue: 21900,
-    currency: 'USD',
+    currency: state.currency || 'BDT',
     timestamp: Date.now()
   });
 
@@ -1037,6 +1076,7 @@ async function runGoogleSearchPreset() {
       utm_medium: 'organic',
       search_term: 'best leather jacket sale'
     },
+    currency: state.currency || 'BDT',
     timestamp: Date.now()
   });
 
@@ -1071,4 +1111,8 @@ async function runBotTrafficPreset() {
 }
 
 // Bootstrap on DOM ready
-document.addEventListener('DOMContentLoaded', init);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

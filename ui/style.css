@@ -256,6 +256,31 @@ body {
   box-shadow: 0 0 0 2px var(--primary-glow);
 }
 
+.pill-select {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 8px 12px;
+  border-radius: var(--radius-full);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pill-select:focus,
+.pill-select:hover {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-glow);
+}
+
+.pill-select option {
+  background: #11141d;
+  color: #fff;
+}
+
 .pill-input-wide {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);

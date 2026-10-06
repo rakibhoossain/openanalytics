@@ -87,7 +87,7 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-Id", "X-Tenant-Id", "openpanel-client-id"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID"},
 		AllowCredentials: false,
 		MaxAge:           86400 * 7,
 	}))
