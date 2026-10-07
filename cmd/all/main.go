@@ -223,11 +223,12 @@ func main() {
 			}
 
 			if procErr == nil && wsHub != nil {
+				tenantKey := event.TenantID.String()
 				shopKey := event.ShopID.String()
-				wsHub.BroadcastEvents(shopKey, 1)
+				wsHub.BroadcastEvents(tenantKey, shopKey, 1)
 				if sessionMgr != nil {
 					if activeCount, aerr := sessionMgr.GetActiveSessionsCount(ctx, event.ShopID); aerr == nil {
-						wsHub.BroadcastVisitors(shopKey, activeCount)
+						wsHub.BroadcastVisitors(tenantKey, shopKey, activeCount)
 					}
 				}
 			}

@@ -68,6 +68,14 @@ func NewWebSocketHub(rdb *redis.Client, qs *Service) *WebSocketHub {
 	}
 }
 
+// clientKey builds the unique subscription routing key enforcing tenant + shop isolation.
+func clientKey(topic, tenantID, shopID string) string {
+	if tenantID != "" {
+		return fmt.Sprintf("%s:%s:%s", topic, tenantID, shopID)
+	}
+	return fmt.Sprintf("%s:%s", topic, shopID)
+}
+
 // Start runs the hub message routing and Redis subscription loops.
 func (h *WebSocketHub) Start(ctx context.Context) {
 	// 1. Hub connection management loop
@@ -78,7 +86,7 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 				return
 			case client := <-h.register:
 				h.mu.Lock()
-				key := fmt.Sprintf("%s:%s", client.topic, client.shopID)
+				key := clientKey(client.topic, client.tenantID, client.shopID)
 				if _, ok := h.subscriptions[key]; !ok {
 					h.subscriptions[key] = make(map[*Client]bool)
 				}
@@ -87,7 +95,7 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 
 			case client := <-h.unregister:
 				h.mu.Lock()
-				key := fmt.Sprintf("%s:%s", client.topic, client.shopID)
+				key := clientKey(client.topic, client.tenantID, client.shopID)
 				if clients, ok := h.subscriptions[key]; ok {
 					if _, exists := clients[client]; exists {
 						delete(clients, client)
@@ -133,9 +141,17 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 					if !ok {
 						return
 					}
-					// Channels format: "analytics:live:{topic}:{shopID}"
+					// Channels format: "analytics:live:{topic}:{tenantID}:{shopID}" or "analytics:live:{topic}:{shopID}"
 					parts := strings.Split(msg.Channel, ":")
-					if len(parts) >= 4 {
+					if len(parts) >= 5 {
+						topic := parts[2]
+						tenantID := parts[3]
+						shopID := parts[4]
+						h.broadcast <- wsBroadcastMessage{
+							key:     clientKey(topic, tenantID, shopID),
+							payload: []byte(msg.Payload),
+						}
+					} else if len(parts) == 4 {
 						topic := parts[2]
 						shopID := parts[3]
 						h.broadcast <- wsBroadcastMessage{
@@ -150,18 +166,16 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 }
 
 // BroadcastVisitors directly dispatches an updated active visitor count to subscribed clients.
-func (h *WebSocketHub) BroadcastVisitors(shopID string, count int64) {
-	// Both superjson and raw string support: openpanel start parses String(count) or superjson
+func (h *WebSocketHub) BroadcastVisitors(tenantID, shopID string, count int64) {
 	payload := fmt.Appendf(nil, `{"json":%d}`, count)
 	h.broadcast <- wsBroadcastMessage{
-		key:     fmt.Sprintf("visitors:%s", shopID),
+		key:     clientKey("visitors", tenantID, shopID),
 		payload: payload,
 	}
 }
 
 // BroadcastEvents directly dispatches a new event notification badge to subscribed clients.
-func (h *WebSocketHub) BroadcastEvents(shopID string, count int) {
-	// SuperJSON format expected by openpanel useWS: {"json":{"count":N}}
+func (h *WebSocketHub) BroadcastEvents(tenantID, shopID string, count int) {
 	envelope := map[string]any{
 		"json": map[string]any{
 			"count": count,
@@ -169,7 +183,7 @@ func (h *WebSocketHub) BroadcastEvents(shopID string, count int) {
 	}
 	bytes, _ := json.Marshal(envelope)
 	h.broadcast <- wsBroadcastMessage{
-		key:     fmt.Sprintf("events:%s", shopID),
+		key:     clientKey("events", tenantID, shopID),
 		payload: bytes,
 	}
 }
