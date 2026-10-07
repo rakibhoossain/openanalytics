@@ -19,14 +19,23 @@ export default defineConfig({
       '/trpc': {
         target: 'http://localhost:8081',
         changeOrigin: true,
+        headers: {
+          'X-AUTH-KEY': process.env.ANALYTICS_AUTH_KEY || 'aicart_analytics_internal_secret_key_8503c2a0',
+        },
       },
       '/api': {
         target: 'http://localhost:8081',
         changeOrigin: true,
+        headers: {
+          'X-AUTH-KEY': process.env.ANALYTICS_AUTH_KEY || 'aicart_analytics_internal_secret_key_8503c2a0',
+        },
       },
       '/misc': {
         target: 'http://localhost:8081',
         changeOrigin: true,
+        headers: {
+          'X-AUTH-KEY': process.env.ANALYTICS_AUTH_KEY || 'aicart_analytics_internal_secret_key_8503c2a0',
+        },
       },
       '/live': {
         target: 'http://localhost:8081',

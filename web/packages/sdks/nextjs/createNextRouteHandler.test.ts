@@ -28,7 +28,8 @@ describe('Next.js Route Handler Proxy', () => {
       method: 'POST',
       headers: {
         'cf-connecting-ip': '203.0.113.195',
-        'openpanel-client-id': '01924b12-0000-7000-8000-000000000001',
+        'x-shop-id': '01924b12-0000-7000-8000-000000000001',
+        'x-tenant-id': '01924b12-0000-7000-8000-000000000002',
         'user-agent': 'Mozilla/5.0 TestBrowser',
       },
       body: JSON.stringify({ name: 'click_btn' }),
@@ -37,8 +38,9 @@ describe('Next.js Route Handler Proxy', () => {
     const response = await handler(req);
     expect(response.status).toBe(202);
     expect(proxiedUrl).toBe('http://backend.internal/api/v1/track');
-    expect(proxiedHeaders?.get('openpanel-client-id')).toBe('01924b12-0000-7000-8000-000000000001');
-    expect(proxiedHeaders?.get('openpanel-client-ip')).toBe('203.0.113.195');
+    expect(proxiedHeaders?.get('X-Shop-ID')).toBe('01924b12-0000-7000-8000-000000000001');
+    expect(proxiedHeaders?.get('X-Tenant-ID')).toBe('01924b12-0000-7000-8000-000000000002');
+    expect(proxiedHeaders?.get('X-Forwarded-For')).toBe('203.0.113.195');
     expect(proxiedHeaders?.get('User-Agent')).toBe('Mozilla/5.0 TestBrowser');
     expect(JSON.parse(proxiedBody)).toEqual({ name: 'click_btn' });
   });

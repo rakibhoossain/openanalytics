@@ -108,15 +108,12 @@ function Component() {
   } = useQuery({
     queryKey: ['ml-intents-enriched', activeShopId],
     queryFn: async (): Promise<IntentShopper[]> => {
-      const res = await fetch(
-        `/api/v1/query/intents?shop_id=${encodeURIComponent(activeShopId)}`,
-        {
-          headers: {
-            'X-Tenant-ID': activeTenantId,
-            'X-Shop-ID': activeShopId,
-          },
-        }
-      );
+      const res = await fetch('/api/v1/query/intents', {
+        headers: {
+          'X-Tenant-ID': activeTenantId,
+          'X-Shop-ID': activeShopId,
+        },
+      });
       if (!res.ok) {
         throw new Error('Failed to fetch ML intent scores');
       }

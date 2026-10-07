@@ -42,10 +42,27 @@ export const getIsomorphicHeaders = createIsomorphicFn()
     if (cookie) {
       result.cookie = cookie;
     }
+    const shopId = headers.get('x-shop-id') || headers.get('X-Shop-ID');
+    if (shopId) result['X-Shop-ID'] = shopId;
+    const tenantId = headers.get('x-tenant-id') || headers.get('X-Tenant-ID');
+    if (tenantId) result['X-Tenant-ID'] = tenantId;
     return result;
   })
   .client(() => {
-    return {};
+    const result: Record<string, string> = {};
+    if (typeof window !== 'undefined') {
+      let tenantId = localStorage.getItem('active_tenant_id') || '';
+      let shopId = localStorage.getItem('active_shop_id') || '';
+
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      if (parts.length >= 2 && !['api', 'widget', 'auth', 'login'].includes(parts[0].toLowerCase())) {
+        if (!tenantId) tenantId = parts[0];
+        if (!shopId) shopId = parts[1];
+      }
+      if (shopId) result['X-Shop-ID'] = shopId;
+      if (tenantId) result['X-Tenant-ID'] = tenantId;
+    }
+    return result;
   });
 
 // Create a function that returns a tRPC client with optional cookies
@@ -61,8 +78,63 @@ export function createTRPCClientWithHeaders(apiUrl: string) {
         headers: () => getIsomorphicHeaders(),
         fetch: async (url, options) => {
           try {
+            const headers = new Headers(options?.headers);
+            // If headers are missing routing context, extract from URL query or body or path
+            if (!headers.get('X-Shop-ID') || !headers.get('X-Tenant-ID')) {
+              // 1. From URL query (GET queries)
+              try {
+                const urlObj = new URL(url.toString(), typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+                const inputParam = urlObj.searchParams.get('input');
+                if (inputParam) {
+                  const parsed = JSON.parse(inputParam);
+                  const jsonInput = parsed?.json || parsed;
+                  const sId = jsonInput?.shopId || jsonInput?.projectId;
+                  const tId = jsonInput?.tenantId || jsonInput?.organizationId;
+                  if (sId && !headers.get('X-Shop-ID')) headers.set('X-Shop-ID', sId);
+                  if (tId && !headers.get('X-Tenant-ID')) headers.set('X-Tenant-ID', tId);
+                }
+              } catch {
+                // ignore
+              }
+
+              // 2. From request body (POST mutations)
+              if ((!headers.get('X-Shop-ID') || !headers.get('X-Tenant-ID')) && options?.body && typeof options.body === 'string') {
+                try {
+                  const parsed = JSON.parse(options.body);
+                  const jsonInput = parsed?.json || parsed;
+                  const sId = jsonInput?.shopId || jsonInput?.projectId;
+                  const tId = jsonInput?.tenantId || jsonInput?.organizationId;
+                  if (sId && !headers.get('X-Shop-ID')) headers.set('X-Shop-ID', sId);
+                  if (tId && !headers.get('X-Tenant-ID')) headers.set('X-Tenant-ID', tId);
+                } catch {
+                  // ignore
+                }
+              }
+
+              // 3. Fallback to localStorage on client
+              if (typeof window !== 'undefined') {
+                if (!headers.get('X-Shop-ID')) {
+                  const sId = localStorage.getItem('active_shop_id');
+                  if (sId) headers.set('X-Shop-ID', sId);
+                }
+                if (!headers.get('X-Tenant-ID')) {
+                  const tId = localStorage.getItem('active_tenant_id');
+                  if (tId) headers.set('X-Tenant-ID', tId);
+                }
+              }
+
+              // 4. Mutual fallback
+              if (!headers.get('X-Shop-ID') && headers.get('X-Tenant-ID')) {
+                headers.set('X-Shop-ID', headers.get('X-Tenant-ID')!);
+              }
+              if (!headers.get('X-Tenant-ID') && headers.get('X-Shop-ID')) {
+                headers.set('X-Tenant-ID', headers.get('X-Shop-ID')!);
+              }
+            }
+
             const response = await fetch(url, {
               ...options,
+              headers,
               mode: 'cors',
               credentials: 'include',
             });

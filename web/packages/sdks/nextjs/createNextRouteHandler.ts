@@ -22,20 +22,17 @@ function getClientHeaders(req: Request, options?: RouteHandlerOptions): Headers 
   headers.set('Content-Type', 'application/json');
 
   const clientId =
-    req.headers.get('openpanel-client-id') ??
-    req.headers.get('openanalytics-client-id') ??
     req.headers.get('x-shop-id') ??
+    req.headers.get('openanalytics-client-id') ??
     options?.shopId ??
     '';
   if (clientId) {
-    headers.set('openpanel-client-id', clientId);
-    headers.set('X-Shop-Id', clientId);
-    headers.set('openanalytics-client-id', clientId);
+    headers.set('X-Shop-ID', clientId);
   }
 
   const tenantId = req.headers.get('x-tenant-id') ?? options?.tenantId;
   if (tenantId) {
-    headers.set('X-Tenant-Id', tenantId);
+    headers.set('X-Tenant-ID', tenantId);
   }
 
   const origin =
@@ -51,7 +48,6 @@ function getClientHeaders(req: Request, options?: RouteHandlerOptions): Headers 
   headers.set('origin', origin);
   headers.set('User-Agent', req.headers.get('user-agent') ?? '');
   if (ip) {
-    headers.set('openpanel-client-ip', ip);
     headers.set('X-Forwarded-For', ip);
   }
 

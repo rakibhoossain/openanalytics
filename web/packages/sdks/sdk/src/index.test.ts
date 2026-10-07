@@ -70,15 +70,16 @@ describe('OpenAnalytics Core SDK', () => {
   it('sets correct headers on outgoing API requests', () => {
     const oa = new OpenAnalytics({
       clientId: '01924b12-0000-7000-8000-000000000001',
+      tenantId: '01924b12-0000-7000-8000-000000000002',
       clientSecret: 'secret_123',
       apiUrl: 'http://localhost:8080',
     });
 
-    expect((oa.api as any).headers['openpanel-client-id']).toBe(
+    expect((oa.api as any).headers['X-Shop-ID']).toBe(
       '01924b12-0000-7000-8000-000000000001'
     );
-    expect((oa.api as any).headers['X-Shop-Id']).toBe(
-      '01924b12-0000-7000-8000-000000000001'
+    expect((oa.api as any).headers['X-Tenant-ID']).toBe(
+      '01924b12-0000-7000-8000-000000000002'
     );
     expect((oa.api as any).headers['X-Client-Secret']).toBe('secret_123');
   });

@@ -13,6 +13,7 @@ const state = {
   tenantId: localStorage.getItem('op_tenant_id') || '019f5bfa-f6e4-76c0-9929-ed0daba7b14b',
   shopId: localStorage.getItem('op_shop_id') || '019fc2f1-6be1-7a2d-9ebf-9f7dced8ccc1',
   currency: localStorage.getItem('op_currency') || 'BDT',
+  authKey: localStorage.getItem('op_auth_key') || window.OPENANALYTICS_AUTH_KEY || 'aicart_analytics_internal_secret_key_8503c2a0',
   timeRange: '7d',
   currentMetric: 'page_views',
   liveInterval: null,
@@ -344,6 +345,7 @@ async function fetchAPI(endpoint, options = {}) {
     'Content-Type': 'application/json',
     'X-Tenant-ID': state.tenantId,
     'X-Shop-ID': state.shopId,
+    ...(state.authKey ? { 'X-AUTH-KEY': state.authKey } : {}),
     ...(options.headers || {})
   };
 
@@ -372,6 +374,7 @@ async function dispatchTelemetry(endpoint, payload) {
         'Content-Type': 'application/json',
         'X-Tenant-ID': state.tenantId,
         'X-Shop-ID': state.shopId,
+        ...(state.authKey ? { 'X-AUTH-KEY': state.authKey } : {}),
       },
       body: JSON.stringify(payload)
     });

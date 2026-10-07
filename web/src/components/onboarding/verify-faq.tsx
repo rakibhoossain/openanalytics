@@ -89,8 +89,8 @@ export function VerifyFaq({
 
   const code = `curl -X POST ${context.apiUrl}/track \\
 -H "Content-Type: application/json" \\
--H "openpanel-client-id: ${client.id}" \\
--H "openpanel-client-secret: ${secret}" \\
+-H "X-Shop-ID: ${client.id}" \\
+-H "X-Client-Secret: ${secret}" \\
 -H "User-Agent: ${typeof window !== 'undefined' ? window.navigator.userAgent : ''}" \\
 -d '${JSON.stringify(payload)}'`;
 

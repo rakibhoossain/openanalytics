@@ -12,7 +12,6 @@ import BillingUsage from './billing-usage';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useNumber } from '@/hooks/use-numer-formatter';
-import useWS from '@/hooks/use-ws';
 import { useTRPC } from '@/integrations/trpc/react';
 import { pushModal, useOnPushModal } from '@/modals';
 import { formatDate } from '@/utils/date';
@@ -53,10 +52,6 @@ export default function Billing({ organization }: Props) {
     })
   );
 
-  useWS(`/live/organization/${organization.id}`, () => {
-    queryClient.invalidateQueries(trpc.organization.pathFilter());
-    queryClient.invalidateQueries(trpc.subscription.pathFilter());
-  });
 
   const [recurringInterval, setRecurringInterval] = useState<'year' | 'month'>(
     (organization.subscriptionInterval as 'year' | 'month') || 'month'

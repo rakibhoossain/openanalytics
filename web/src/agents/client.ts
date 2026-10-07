@@ -33,8 +33,16 @@ export function getChatClient(apiUrl: string): AppClient {
   cachedBaseURL = apiUrl;
   cachedClient = createClient<ChatApp>({
     baseURL: `${apiUrl}/ai/agents`,
-    fetch: (input, init) =>
-      fetch(input, { ...init, credentials: 'include' }),
+    fetch: (input, init) => {
+      const headers = new Headers(init?.headers);
+      if (typeof window !== 'undefined') {
+        const sId = localStorage.getItem('active_shop_id');
+        const tId = localStorage.getItem('active_tenant_id');
+        if (sId && !headers.get('X-Shop-ID')) headers.set('X-Shop-ID', sId);
+        if (tId && !headers.get('X-Tenant-ID')) headers.set('X-Tenant-ID', tId);
+      }
+      return fetch(input, { ...init, headers, credentials: 'include' });
+    },
   });
   return cachedClient;
 }

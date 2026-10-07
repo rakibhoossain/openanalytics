@@ -81,7 +81,12 @@ export default function IntegrationsPage() {
   const { data: configData, isLoading } = useQuery<{ success: boolean; data: MetaIntegrationData }>({
     queryKey: ['meta-capi-config', activeShopId],
     queryFn: async () => {
-      const res = await fetch(`/api/v1/integrations/meta?shop_id=${activeShopId}`);
+      const res = await fetch('/api/v1/integrations/meta', {
+        headers: {
+          'X-Shop-ID': activeShopId,
+          'X-Tenant-ID': activeTenantId,
+        },
+      });
       if (!res.ok) throw new Error('Failed to load Meta configuration');
       return res.json();
     },
@@ -106,7 +111,11 @@ export default function IntegrationsPage() {
     mutationFn: async () => {
       const res = await fetch('/api/v1/integrations/meta', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shop-ID': activeShopId,
+          'X-Tenant-ID': activeTenantId,
+        },
         body: JSON.stringify({
           shop_id: activeShopId,
           tenant_id: activeTenantId,
@@ -134,7 +143,11 @@ export default function IntegrationsPage() {
     mutationFn: async () => {
       const res = await fetch('/api/v1/integrations/meta/test', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shop-ID': activeShopId,
+          'X-Tenant-ID': activeTenantId,
+        },
         body: JSON.stringify({
           shop_id: activeShopId,
           pixel_id: pixelId.trim(),

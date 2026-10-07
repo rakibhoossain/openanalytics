@@ -29,6 +29,8 @@ export type UpsertGroupPayload = GroupPayload;
 
 export interface OpenAnalyticsOptions {
   clientId: string;
+  shopId?: string;
+  tenantId?: string;
   clientSecret?: string;
   apiUrl?: string;
   sdk?: string;
@@ -54,14 +56,16 @@ export class OpenAnalytics {
   constructor(options: OpenAnalyticsOptions) {
     this.options = options;
 
+    const shopId = options.shopId || options.clientId;
     const defaultHeaders: Record<string, string> = {
-      'openpanel-client-id': options.clientId,
-      'X-Shop-Id': options.clientId,
-      'openanalytics-client-id': options.clientId,
+      'X-Shop-ID': shopId,
     };
 
+    if (options.tenantId) {
+      defaultHeaders['X-Tenant-ID'] = options.tenantId;
+    }
+
     if (options.clientSecret) {
-      defaultHeaders['openpanel-client-secret'] = options.clientSecret;
       defaultHeaders['X-Client-Secret'] = options.clientSecret;
     }
 

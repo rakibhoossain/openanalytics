@@ -31,20 +31,24 @@ const isStaticFile = (path: string) => {
   return FILE_EXTENSIONS.some((extension) => path.endsWith(`.${extension}`));
 };
 
+import { useEffect } from 'react';
+
 export const Route = createFileRoute('/_app/$tenantId')({
   component: Component,
   beforeLoad: async ({ params }) => {
-    if (IGNORE_ORGANIZATION_IDS.includes((params.tenantId || params.organizationId))) {
+    const p = params as any;
+    if (IGNORE_ORGANIZATION_IDS.includes(p.tenantId || p.organizationId)) {
       throw notFound();
     }
-    if (isStaticFile((params.tenantId || params.organizationId))) {
+    if (isStaticFile(p.tenantId || p.organizationId)) {
       throw notFound();
     }
   },
   loader: async ({ context, params }) => {
+    const p = params as any;
     await context.queryClient.prefetchQuery(
       context.trpc.organization.get.queryOptions({
-        organizationId: (params.tenantId || params.organizationId),
+        organizationId: (p.tenantId || p.organizationId),
       }),
     );
   },
@@ -64,6 +68,13 @@ export const Route = createFileRoute('/_app/$tenantId')({
 function Component() {
   const params = Route.useParams() as any;
   const organizationId = params.tenantId || (params.tenantId || params.organizationId);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && organizationId) {
+      localStorage.setItem('active_tenant_id', organizationId);
+    }
+  }, [organizationId]);
+
   const trpc = useTRPC();
   useSuspenseQuery(
     trpc.organization.get.queryOptions({

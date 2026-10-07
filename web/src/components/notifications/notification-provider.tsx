@@ -13,14 +13,8 @@ export function NotificationProvider() {
 }
 
 export function InnerNotificationProvider({
-  projectId,
-}: { projectId: string }) {
-  useWS<Notification>(`/live/notifications/${projectId}`, (notification) => {
-    toast(notification.title, {
-      description: notification.message,
-      icon: <BellIcon className="size-4" />,
-    });
-  });
-
+  _projectId,
+}: { _projectId?: string; projectId?: string }) {
+  // Live notifications route was deprecated and removed from the Go engine.
   return null;
 }

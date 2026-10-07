@@ -214,16 +214,16 @@ func GetBuiltinDashboards(tenantID, shopID uuid.UUID) []map[string]any {
 				"chartType": r.ChartType,
 			})
 		}
-		res = append(res, map[string]any{
-			"id":             d.ID,
-			"name":           d.Name,
-			"description":    d.Description,
-			"projectId":      shopID.String(),
-			"organizationId": tenantID.String(),
-			"isDefault":      d.IsDefault,
-			"createdAt":      now,
-			"updatedAt":      now,
-			"reports":        reps,
+			res = append(res, map[string]any{
+			"id":          d.ID,
+			"name":        d.Name,
+			"description": d.Description,
+			"shopId":      shopID.String(),
+			"tenantId":    tenantID.String(),
+			"isDefault":   d.IsDefault,
+			"createdAt":   now,
+			"updatedAt":   now,
+			"reports":     reps,
 		})
 	}
 	return res
@@ -235,28 +235,28 @@ func GetBuiltinDashboardByID(tenantID, shopID uuid.UUID, id string) map[string]a
 	for _, d := range defaultDashboards {
 		if d.ID == id || id == "overview" && d.ID == DashboardOverviewID || id == "funnel" && d.ID == DashboardFunnelID || id == "ml_intent" && d.ID == DashboardMLIntentID || id == "products" && d.ID == DashboardProductsID || id == "acquisition" && d.ID == DashboardAcquisitionID {
 			return map[string]any{
-				"id":             d.ID,
-				"name":           d.Name,
-				"description":    d.Description,
-				"projectId":      shopID.String(),
-				"organizationId": tenantID.String(),
-				"isDefault":      d.IsDefault,
-				"createdAt":      now,
-				"updatedAt":      now,
+				"id":          d.ID,
+				"name":        d.Name,
+				"description": d.Description,
+				"shopId":      shopID.String(),
+				"tenantId":    tenantID.String(),
+				"isDefault":   d.IsDefault,
+				"createdAt":   now,
+				"updatedAt":   now,
 			}
 		}
 	}
 	// Fallback to first default dashboard
 	d := defaultDashboards[0]
 	return map[string]any{
-		"id":             d.ID,
-		"name":           d.Name,
-		"description":    d.Description,
-		"projectId":      shopID.String(),
-		"organizationId": tenantID.String(),
-		"isDefault":      true,
-		"createdAt":      now,
-		"updatedAt":      now,
+		"id":          d.ID,
+		"name":        d.Name,
+		"description": d.Description,
+		"shopId":      shopID.String(),
+		"tenantId":    tenantID.String(),
+		"isDefault":   true,
+		"createdAt":   now,
+		"updatedAt":   now,
 	}
 }
 
@@ -284,7 +284,8 @@ func GetBuiltinReportsByDashboardID(tenantID, shopID uuid.UUID, dashboardID stri
 			"name":        r.Name,
 			"chartType":   chartType,
 			"dashboardId": dashboardID,
-			"projectId":   shopID.String(),
+			"shopId":      shopID.String(),
+			"tenantId":    tenantID.String(),
 			"range":       r.Range,
 			"interval":    r.Interval,
 			"series":      r.Series,
@@ -315,7 +316,8 @@ func GetBuiltinReportByID(tenantID, shopID uuid.UUID, id string) map[string]any 
 					"name":        r.Name,
 					"chartType":   chartType,
 					"dashboardId": d.ID,
-					"projectId":   shopID.String(),
+					"shopId":      shopID.String(),
+					"tenantId":    tenantID.String(),
 					"range":       r.Range,
 					"interval":    r.Interval,
 					"series":      r.Series,

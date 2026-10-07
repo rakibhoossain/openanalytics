@@ -1299,15 +1299,16 @@ func (h *Handler) HandleTRPCLiveData(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleTRPCProjectGet(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	sendTRPCResponse(w, map[string]any{
-		"id":             shopID.String(),
-		"name":           "Primary Store",
-		"organizationId": tenantID.String(),
-		"timezone":       "UTC",
+		"id":       shopID.String(),
+		"name":     "Primary Store",
+		"shopId":   shopID.String(),
+		"tenantId": tenantID.String(),
+		"timezone": "UTC",
 		"clients": []map[string]any{
 			{
-				"id":        "cl_default_web",
-				"name":      "Default Web Client",
-				"projectId": shopID.String(),
+				"id":     "cl_default_web",
+				"name":   "Default Web Client",
+				"shopId": shopID.String(),
 			},
 		},
 	})
@@ -1317,9 +1318,9 @@ func (h *Handler) HandleTRPCClientList(w http.ResponseWriter, r *http.Request) {
 	_, shopID, _ := h.extractTenantAndShop(r)
 	sendTRPCResponse(w, []map[string]any{
 		{
-			"id":        "cl_default_web",
-			"name":      "Default Web Client",
-			"projectId": shopID.String(),
+			"id":     "cl_default_web",
+			"name":   "Default Web Client",
+			"shopId": shopID.String(),
 		},
 	})
 }
@@ -1343,9 +1344,10 @@ func (h *Handler) HandleTRPCProjectList(w http.ResponseWriter, r *http.Request) 
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	sendTRPCResponse(w, []map[string]any{
 		{
-			"id":             shopID.String(),
-			"name":           "Primary Store",
-			"organizationId": tenantID.String(),
+			"id":       shopID.String(),
+			"name":     "Primary Store",
+			"shopId":   shopID.String(),
+			"tenantId": tenantID.String(),
 		},
 	})
 }
@@ -3236,7 +3238,7 @@ func (h *Handler) HandleTRPCDashboardCreate(w http.ResponseWriter, r *http.Reque
 		if n, ok := input["name"].(string); ok && n != "" {
 			name = n
 		}
-		if p, ok := input["projectId"].(string); ok && p != "" {
+		if p, ok := input["shopId"].(string); ok && p != "" {
 			if parsed, err := uuid.Parse(p); err == nil {
 				shopID = parsed
 			}
@@ -3245,13 +3247,13 @@ func (h *Handler) HandleTRPCDashboardCreate(w http.ResponseWriter, r *http.Reque
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	sendTRPCResponse(w, map[string]any{
-		"id":             uuidv7.MustNew().String(),
-		"name":           name,
-		"projectId":      shopID.String(),
-		"organizationId": tenantID.String(),
-		"isDefault":      false,
-		"createdAt":      now,
-		"updatedAt":      now,
+		"id":        uuidv7.MustNew().String(),
+		"name":      name,
+		"shopId":    shopID.String(),
+		"tenantId":  tenantID.String(),
+		"isDefault": false,
+		"createdAt": now,
+		"updatedAt": now,
 	})
 }
 
@@ -3270,10 +3272,10 @@ func (h *Handler) HandleTRPCDashboardUpdate(w http.ResponseWriter, r *http.Reque
 	}
 
 	sendTRPCResponse(w, map[string]any{
-		"id":             idStr,
-		"name":           name,
-		"projectId":      shopID.String(),
-		"organizationId": tenantID.String(),
+		"id":       idStr,
+		"name":     name,
+		"shopId":   shopID.String(),
+		"tenantId": tenantID.String(),
 	})
 }
 
@@ -3300,7 +3302,7 @@ func (h *Handler) HandleTRPCReportList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleTRPCReportCreate(w http.ResponseWriter, r *http.Request) {
-	_, shopID, _ := h.extractTenantAndShop(r)
+	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	input := parseTRPCInput(r)
 
 	dashboardID := DashboardOverviewID
@@ -3330,7 +3332,8 @@ func (h *Handler) HandleTRPCReportCreate(w http.ResponseWriter, r *http.Request)
 	reportMap["id"] = reportID.String()
 	reportMap["name"] = name
 	reportMap["dashboardId"] = dashboardID
-	reportMap["projectId"] = shopID.String()
+	reportMap["shopId"] = shopID.String()
+	reportMap["tenantId"] = tenantID.String()
 	reportMap["chartType"] = chartType
 	if sList, ok := reportMap["series"].([]any); !ok || len(sList) == 0 {
 		evList, okEv := reportMap["events"].([]any)
@@ -3375,7 +3378,8 @@ func (h *Handler) HandleTRPCReportGet(w http.ResponseWriter, r *http.Request) {
 		"id":        reportID,
 		"name":      "Report",
 		"chartType": "linear",
-		"projectId": shopID.String(),
+		"shopId":    shopID.String(),
+		"tenantId":  tenantID.String(),
 		"events":    []any{},
 		"series":    []any{},
 		"range":     "30d",

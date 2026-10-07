@@ -28,11 +28,11 @@ type Config struct {
 	RedisSessionTTLMinutes int
 
 	// Kafka
-	KafkaBrokers       string
-	KafkaEventsTopic   string
-	KafkaSessionsTopic string
-	KafkaConsumerGroup string
-	KafkaBatchSize     int
+	KafkaBrokers        string
+	KafkaEventsTopic    string
+	KafkaSessionsTopic  string
+	KafkaConsumerGroup  string
+	KafkaBatchSize      int
 	KafkaBatchTimeoutMs int
 
 	// GeoIP (Reads database files populated by geoipupdate docker service)
@@ -41,6 +41,9 @@ type Config struct {
 	// Machine Learning
 	MLModelPath        string
 	MLInferenceEnabled bool
+
+	// Security
+	AuthKey string
 }
 
 // Load reads configuration from environment variables with defaults.
@@ -74,6 +77,8 @@ func Load() *Config {
 
 		MLModelPath:        getEnv("ML_MODEL_PATH", "data/models/cart_intent_v1.onnx"),
 		MLInferenceEnabled: getEnvAsBool("ML_INFERENCE_ENABLED", true),
+
+		AuthKey: getEnv("ANALYTICS_AUTH_KEY", ""),
 	}
 }
 
