@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
@@ -236,14 +235,7 @@ func (c *Client) writePump() {
 	}
 }
 
-// extractTargetIDs extracts optional shopID and tenantID from URL path params.
-func extractTargetIDs(r *http.Request) (string, string) {
-	shopID := chi.URLParam(r, "shopId")
-	tenantID := chi.URLParam(r, "tenantId")
-	return shopID, tenantID
-}
-
-// resolveWSTargets extracts and validates targets directly from the JWT token and optional path params.
+// resolveWSTargets extracts and validates targets directly from verified JWT token claims.
 func resolveWSTargets(w http.ResponseWriter, r *http.Request) (string, string, bool) {
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -251,26 +243,19 @@ func resolveWSTargets(w http.ResponseWriter, r *http.Request) (string, string, b
 		return "", "", false
 	}
 
-	pathShopID, pathTenantID := extractTargetIDs(r)
-
-	// Validate token. If pathShopID is set, enforces match. If pathShopID is empty, validates signature and returns token claims.
-	claims, err := ValidateWSToken(token, pathShopID)
+	claims, err := ValidateWSToken(token, "")
 	if err != nil {
 		log.Printf("[WebSocket] Rejecting unauthorized connection: %v", err)
 		http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 		return "", "", false
 	}
 
-	shopID := pathShopID
-	if shopID == "" {
-		shopID = claims.ShopID
-	}
-	tenantID := pathTenantID
-	if tenantID == "" {
-		tenantID = claims.TenantID
+	if claims.ShopID == "" {
+		http.Error(w, "Unauthorized: missing shop_id in token", http.StatusUnauthorized)
+		return "", "", false
 	}
 
-	return shopID, tenantID, true
+	return claims.ShopID, claims.TenantID, true
 }
 
 // ServeLiveVisitors handles GET /live/visitors WebSocket upgrade.
