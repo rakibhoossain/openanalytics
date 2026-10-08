@@ -372,14 +372,53 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 	events := make([]*domain.Event, 0, len(batch.Events))
 	for _, req := range batch.Events {
 		if req.Name == "" {
-			continue
-		}
-
-		if req.Name == "" && req.Event != "" {
-			req.Name = req.Event
+			if req.Event != "" {
+				req.Name = req.Event
+			} else if req.ProfileID != "" || req.AltProfID != "" {
+				req.Name = "identify"
+			}
 		}
 		if req.Name == "" {
 			continue
+		}
+
+		if req.CustomerID == "" {
+			if req.ProfileID != "" {
+				req.CustomerID = req.ProfileID
+			} else if req.AltProfID != "" {
+				req.CustomerID = req.AltProfID
+			}
+		}
+
+		if req.Name == "identify" {
+			if req.Properties == nil {
+				req.Properties = make(map[string]interface{})
+			}
+			if req.ProfileID != "" {
+				req.Properties["profileId"] = req.ProfileID
+			}
+			if req.Email != "" {
+				req.Properties["email"] = req.Email
+			}
+			if req.FirstName != "" {
+				req.Properties["firstName"] = req.FirstName
+			}
+			if req.LastName != "" {
+				req.Properties["lastName"] = req.LastName
+			}
+
+			if req.UserData == nil {
+				req.UserData = &UserData{}
+			}
+			if req.UserData.Email == "" && req.Email != "" {
+				req.UserData.Email = req.Email
+			}
+			if req.UserData.FirstName == "" && req.FirstName != "" {
+				req.UserData.FirstName = req.FirstName
+			}
+			if req.UserData.LastName == "" && req.LastName != "" {
+				req.UserData.LastName = req.LastName
+			}
 		}
 
 		shopID, err := h.resolveShopID(r, &req)
@@ -514,10 +553,16 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	httputil.JSON(w, http.StatusAccepted, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":   "accepted",
 		"accepted": len(events),
-	})
+	}
+	if len(events) > 0 {
+		resp["deviceId"] = events[0].DeviceID
+		resp["sessionId"] = events[0].SessionID.String()
+	}
+
+	httputil.JSON(w, http.StatusAccepted, resp)
 }
 
 // HandleDeviceID handles GET /api/v1/track/device-id.
