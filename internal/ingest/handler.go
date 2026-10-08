@@ -17,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/clickhouse"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/kafka"
@@ -31,24 +32,26 @@ import (
 
 // Handler handles incoming ingestion requests.
 type Handler struct {
-	geoService  *geo.Service
-	producer    *kafka.Producer
-	redisClient *redis.Client
-	salt        string
-	chWriter    *clickhouse.BatchWriter
-	sessionMgr  *session.Manager
-	onEvent     func(event *domain.Event)
+	geoService      *geo.Service
+	producer        *kafka.Producer
+	redisClient     *redis.Client
+	salt            string
+	chWriter        *clickhouse.BatchWriter
+	sessionMgr      *session.Manager
+	currencyService *currency.Service
+	onEvent         func(event *domain.Event)
 }
 
 // Config holds dependencies for Handler.
 type Config struct {
-	GeoService  *geo.Service
-	Producer    *kafka.Producer
-	RedisClient *redis.Client
-	Salt        string
-	CHWriter    *clickhouse.BatchWriter
-	SessionMgr  *session.Manager
-	OnEvent     func(event *domain.Event)
+	GeoService      *geo.Service
+	Producer        *kafka.Producer
+	RedisClient     *redis.Client
+	Salt            string
+	CHWriter        *clickhouse.BatchWriter
+	SessionMgr      *session.Manager
+	CurrencyService *currency.Service
+	OnEvent         func(event *domain.Event)
 }
 
 // NewHandler creates a new Ingestion Handler.
@@ -59,13 +62,14 @@ func NewHandler(cfg Config) *Handler {
 	}
 
 	return &Handler{
-		geoService:  cfg.GeoService,
-		producer:    cfg.Producer,
-		redisClient: cfg.RedisClient,
-		salt:        salt,
-		chWriter:    cfg.CHWriter,
-		sessionMgr:  cfg.SessionMgr,
-		onEvent:     cfg.OnEvent,
+		geoService:      cfg.GeoService,
+		producer:        cfg.Producer,
+		redisClient:     cfg.RedisClient,
+		salt:            salt,
+		chWriter:        cfg.CHWriter,
+		sessionMgr:      cfg.SessionMgr,
+		currencyService: cfg.CurrencyService,
+		onEvent:         cfg.OnEvent,
 	}
 }
 
@@ -267,6 +271,17 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		eventUUID = uuidv7.MustNew()
 	}
 
+	revPtr := flexibleInt64Ptr(req.Revenue)
+	var revUSDPtr *int64
+	if revPtr != nil {
+		if h.currencyService != nil {
+			v := h.currencyService.ConvertToUSD(*revPtr, req.Currency)
+			revUSDPtr = &v
+		} else {
+			revUSDPtr = revPtr
+		}
+	}
+
 	event := &domain.Event{
 		ID:           eventUUID,
 		TenantID:     tenantID,
@@ -274,8 +289,9 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		Name:         req.Name,
 		DeviceID:     deviceID,
 		SessionID:    sessionID,
-		Revenue:      flexibleInt64Ptr(req.Revenue),
+		Revenue:      revPtr,
 		Currency:     req.Currency,
+		RevenueUSD:   revUSDPtr,
 		ProductID:    parseUUIDPtr(req.ProductID),
 		CartID:       parseUUIDPtr(req.CartID),
 		OrderID:      parseUUIDPtr(req.OrderID),
@@ -483,6 +499,17 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			eventUUID = uuidv7.MustNew()
 		}
 
+		revPtr := flexibleInt64Ptr(req.Revenue)
+		var revUSDPtr *int64
+		if revPtr != nil {
+			if h.currencyService != nil {
+				v := h.currencyService.ConvertToUSD(*revPtr, req.Currency)
+				revUSDPtr = &v
+			} else {
+				revUSDPtr = revPtr
+			}
+		}
+
 		event := &domain.Event{
 			ID:           eventUUID,
 			TenantID:     tenantID,
@@ -490,8 +517,9 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 			Name:         req.Name,
 			DeviceID:     deviceID,
 			SessionID:    sessionID,
-			Revenue:      flexibleInt64Ptr(req.Revenue),
+			Revenue:      revPtr,
 			Currency:     req.Currency,
+			RevenueUSD:   revUSDPtr,
 			ProductID:    parseUUIDPtr(req.ProductID),
 			CartID:       parseUUIDPtr(req.CartID),
 			OrderID:      parseUUIDPtr(req.OrderID),

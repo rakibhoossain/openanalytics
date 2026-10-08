@@ -17,9 +17,10 @@ type Event struct {
 	SessionID  uuid.UUID `json:"session_id"`            // UUIDv7
 
 	// E-Commerce Attributes (Revenue stored in exact integer cents, e.g. $1.78 = 178 cents)
-	Revenue   *int64     `json:"revenue,omitempty"`
-	Currency  string     `json:"currency,omitempty"`
-	ProductID *uuid.UUID `json:"product_id,omitempty"`
+	Revenue    *int64     `json:"revenue,omitempty"`
+	Currency   string     `json:"currency,omitempty"`
+	RevenueUSD *int64     `json:"revenue_usd,omitempty"`
+	ProductID  *uuid.UUID `json:"product_id,omitempty"`
 	CartID    *uuid.UUID `json:"cart_id,omitempty"`
 	OrderID   *uuid.UUID `json:"order_id,omitempty"`
 
@@ -64,7 +65,8 @@ type Session struct {
 	ScreenViewsCount uint32 `json:"screen_views_count,omitempty"`
 	HasCartAdd       bool   `json:"has_cart_add"`
 	HasPurchase      bool   `json:"has_purchase"`
-	TotalRevenue     int64  `json:"total_revenue"` // Stored in integer cents
+	TotalRevenue     int64  `json:"total_revenue"`
+	TotalRevenueUSD  int64  `json:"total_revenue_usd"` // Stored in normalized USD cents
 
 	Country string `json:"country,omitempty"`
 	City    string `json:"city,omitempty"`
@@ -112,8 +114,9 @@ type OverviewSeriesPoint struct {
 
 // OverviewStatsResult packages both current/previous totals and time series.
 type OverviewStatsResult struct {
-	Metrics OverviewMetrics       `json:"metrics"`
-	Series  []OverviewSeriesPoint `json:"series"`
+	Currency string                `json:"currency,omitempty"`
+	Metrics  OverviewMetrics       `json:"metrics"`
+	Series   []OverviewSeriesPoint `json:"series"`
 }
 
 // TopItem represents an aggregated dimension item (e.g. source, page, device).

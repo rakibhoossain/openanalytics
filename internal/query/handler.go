@@ -14,12 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/cron"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/integrations/meta"
 	"openanalytics/pkg/httputil"
@@ -28,11 +29,13 @@ import (
 
 // Handler serves HTTP endpoints for dashboards and analytical queries.
 type Handler struct {
-	queryService *Service
-	rdb          *redis.Client
-	wsHub        *WebSocketHub
-	metaRepo     *meta.Repository
-	metaClient   *meta.Client
+	queryService    *Service
+	rdb             *redis.Client
+	pgPool          *pgxpool.Pool
+	wsHub           *WebSocketHub
+	metaRepo        *meta.Repository
+	metaClient      *meta.Client
+	currencyService *currency.Service
 }
 
 // NewHandler creates a new Query HTTP Handler.
@@ -40,6 +43,29 @@ func NewHandler(qs *Service) *Handler {
 	return &Handler{
 		queryService: qs,
 	}
+}
+
+// WithCurrency attaches currency service for exchange rate lookups.
+func (h *Handler) WithCurrency(cs *currency.Service) *Handler {
+	h.currencyService = cs
+	return h
+}
+
+func (h *Handler) extractCurrency(r *http.Request) string {
+	c := r.Header.Get("X-Currency")
+	if c == "" {
+		c = h.getParam(r, "currency")
+	}
+	if c == "" {
+		return "USD"
+	}
+	return strings.ToUpper(strings.TrimSpace(c))
+}
+
+// WithPostgres attaches a PostgreSQL pool for relational configuration and metadata.
+func (h *Handler) WithPostgres(pool *pgxpool.Pool) *Handler {
+	h.pgPool = pool
+	return h
 }
 
 // WithRedis attaches a Redis client for real-time feature store queries.
@@ -279,8 +305,9 @@ func (h *Handler) HandleTrends(w http.ResponseWriter, r *http.Request) {
 	metric := r.URL.Query().Get("metric")
 	timeRange := r.URL.Query().Get("time_range")
 	interval := r.URL.Query().Get("interval")
+	targetCurrency := h.extractCurrency(r)
 
-	points, err := h.queryService.GetTrends(r.Context(), tenantID, shopID, metric, timeRange, interval)
+	points, err := h.queryService.GetTrends(r.Context(), tenantID, shopID, metric, timeRange, interval, targetCurrency)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_FAILED", err.Error())
 		return
@@ -289,6 +316,7 @@ func (h *Handler) HandleTrends(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{
 		"metric":     metric,
 		"time_range": timeRange,
+		"currency":   targetCurrency,
 		"data":       points,
 	})
 }
@@ -559,24 +587,33 @@ func roundVal(val float64, precision int) float64 {
 	return math.Round(val*pow) / pow
 }
 
-// Helper: extract tenant_id and shop_id strictly from headers.
+// Helper: extract tenant_id and shop_id from headers, URL parameters, or tRPC input.
 func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, error) {
 	sStr := r.Header.Get("X-Shop-ID")
 	if sStr == "" {
-		return uuid.Nil, uuid.Nil, errors.New("missing required X-Shop-ID header")
+		sStr = h.getParam(r, "shopId")
+	}
+	if sStr == "" {
+		sStr = h.getParam(r, "projectId")
+	}
+	if sStr == "" {
+		return uuid.Nil, uuid.Nil, errors.New("missing required shop ID (X-Shop-ID, shopId, or projectId)")
 	}
 	shopID, err := uuid.Parse(sStr)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid X-Shop-ID header: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid shop ID: %w", err)
 	}
 
 	tStr := r.Header.Get("X-Tenant-ID")
 	if tStr == "" {
-		return uuid.Nil, uuid.Nil, errors.New("missing required X-Tenant-ID header")
+		tStr = h.getParam(r, "tenantId")
 	}
-	tenantID, err := uuid.Parse(tStr)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid X-Tenant-ID header: %w", err)
+	var tenantID uuid.UUID
+	if tStr != "" {
+		tenantID, _ = uuid.Parse(tStr)
+	}
+	if tenantID == uuid.Nil {
+		tenantID = h.resolveTenantForShop(r.Context(), shopID)
 	}
 
 	return tenantID, shopID, nil
@@ -705,8 +742,9 @@ func (h *Handler) HandleOverviewStats(w http.ResponseWriter, r *http.Request) {
 	intervalStr := h.getParam(r, "interval")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	res, err := h.queryService.GetOverviewStats(r.Context(), tenantID, shopID, rangeStr, intervalStr, startStr, endStr)
+	res, err := h.queryService.GetOverviewStats(r.Context(), tenantID, shopID, rangeStr, intervalStr, startStr, endStr, targetCurrency)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_ERROR", err.Error())
 		return
@@ -734,8 +772,9 @@ func (h *Handler) HandleTopGeneric(w http.ResponseWriter, r *http.Request) {
 			limit = l
 		}
 	}
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, limit)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, limit, targetCurrency)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_ERROR", err.Error())
 		return
@@ -766,8 +805,9 @@ func (h *Handler) HandleTopPages(w http.ResponseWriter, r *http.Request) {
 			limit = l
 		}
 	}
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopPages(r.Context(), tenantID, shopID, mode, rangeStr, startStr, endStr, limit)
+	items, err := h.queryService.GetTopPages(r.Context(), tenantID, shopID, mode, rangeStr, startStr, endStr, limit, targetCurrency)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_ERROR", err.Error())
 		return
@@ -823,7 +863,8 @@ func (h *Handler) HandleTopGeo(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, limit)
+	targetCurrency := h.extractCurrency(r)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, limit, targetCurrency)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_ERROR", err.Error())
 		return
@@ -965,7 +1006,7 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 			toString(any(customer_id)) as customer_id,
 			count(*) as events_count,
 			uniqExact(session_id) as sessions_count,
-			coalesce(sum(revenue), 0) as total_revenue,
+			coalesce(sum(revenue_usd), 0) as total_revenue,
 			min(created_at) as first_seen,
 			max(created_at) as last_seen,
 			any(country) as country,
@@ -991,6 +1032,10 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 			var revCents int64
 			var firstSeen, lastSeen time.Time
 			if err := rows.Scan(&devID, &custID, &evCount, &sessCount, &revCents, &firstSeen, &lastSeen, &country, &city, &browser, &os, &device); err == nil {
+				targetCurrency := h.extractCurrency(r)
+				if h.currencyService != nil && targetCurrency != "USD" {
+					revCents = h.currencyService.ConvertFromUSD(revCents, targetCurrency)
+				}
 				isIdentified := custID != "" && custID != "00000000-0000-0000-0000-000000000000"
 				items = append(items, map[string]any{
 					"id":             devID,
@@ -1046,7 +1091,7 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 			toString(any(customer_id)) as customer_id,
 			count(*) as events_count,
 			uniqExact(session_id) as sessions_count,
-			coalesce(sum(revenue), 0) as total_revenue,
+			coalesce(sum(revenue_usd), 0) as total_revenue,
 			min(created_at) as first_seen,
 			max(created_at) as last_seen,
 			any(country) as country,
@@ -1088,6 +1133,11 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	targetCurrency := h.extractCurrency(r)
+	if h.currencyService != nil && targetCurrency != "USD" {
+		totRev = h.currencyService.ConvertFromUSD(totRev, targetCurrency)
+	}
+
 	isIdentified := custID != "" && custID != "00000000-0000-0000-0000-000000000000"
 
 	httputil.JSON(w, http.StatusOK, map[string]any{
@@ -1096,6 +1146,7 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 		"events_count":   evCount,
 		"sessions_count": sessCount,
 		"total_revenue":  totRev,
+		"currency":       targetCurrency,
 		"first_seen":     firstSeen.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"last_seen":      lastSeen.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"country":        country,
@@ -1119,8 +1170,9 @@ func (h *Handler) HandleTRPCOverviewStats(w http.ResponseWriter, r *http.Request
 	intervalStr := h.getParam(r, "interval")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	res, err := h.queryService.GetOverviewStats(r.Context(), tenantID, shopID, rangeStr, intervalStr, startStr, endStr)
+	res, err := h.queryService.GetOverviewStats(r.Context(), tenantID, shopID, rangeStr, intervalStr, startStr, endStr, targetCurrency)
 	if err != nil {
 		sendTRPCResponse(w, map[string]any{
 			"metrics": map[string]any{},
@@ -1140,8 +1192,9 @@ func (h *Handler) HandleTRPCOverviewTopGeneric(w http.ResponseWriter, r *http.Re
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, 10)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, 10, targetCurrency)
 	if err != nil || items == nil {
 		items = []domain.TopItem{}
 	}
@@ -1157,8 +1210,9 @@ func (h *Handler) HandleTRPCOverviewTopGenericSeries(w http.ResponseWriter, r *h
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, 10)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, column, rangeStr, startStr, endStr, 10, targetCurrency)
 	seriesItems := make([]map[string]any, 0)
 	if err == nil && items != nil {
 		for _, it := range items {
@@ -1186,8 +1240,9 @@ func (h *Handler) HandleTRPCOverviewTopPages(w http.ResponseWriter, r *http.Requ
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopPages(r.Context(), tenantID, shopID, mode, rangeStr, startStr, endStr, 10)
+	items, err := h.queryService.GetTopPages(r.Context(), tenantID, shopID, mode, rangeStr, startStr, endStr, 10, targetCurrency)
 	var resp []map[string]any
 	if err == nil && items != nil {
 		for _, it := range items {
@@ -1212,8 +1267,9 @@ func (h *Handler) HandleTRPCOverviewTopSources(w http.ResponseWriter, r *http.Re
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "referrer_name", rangeStr, startStr, endStr, 10)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "referrer_name", rangeStr, startStr, endStr, 10, targetCurrency)
 	if err != nil || items == nil {
 		items = []domain.TopItem{}
 	}
@@ -1238,8 +1294,9 @@ func (h *Handler) HandleTRPCOverviewTopGeo(w http.ResponseWriter, r *http.Reques
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, 10)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, 10, targetCurrency)
 	if err != nil || items == nil {
 		items = []domain.TopItem{}
 	}
@@ -1251,8 +1308,9 @@ func (h *Handler) HandleTRPCOverviewMap(w http.ResponseWriter, r *http.Request) 
 	rangeStr := h.getParam(r, "range")
 	startStr := h.getParam(r, "startDate")
 	endStr := h.getParam(r, "endDate")
+	targetCurrency := h.extractCurrency(r)
 
-	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, 100)
+	items, err := h.queryService.GetTopGeneric(r.Context(), tenantID, shopID, "country", rangeStr, startStr, endStr, 100, targetCurrency)
 	var resp []map[string]any
 	if err == nil && items != nil {
 		for _, it := range items {
@@ -1852,17 +1910,22 @@ func (h *Handler) HandleTRPCProfileMetrics(w http.ResponseWriter, r *http.Reques
 				minIf(created_at, created_at > '2000-01-01'),
 				max(created_at),
 				count(distinct toDate(created_at)),
-				round(sum(coalesce(revenue, 0)) / 100, 2)
+				coalesce(sum(revenue_usd), 0)
 			FROM %s.events
 			WHERE (device_id = ? OR toString(customer_id) = ?)
 		`, h.queryService.database)
 		var totalEv, totalSess, screenViews, convEv, uniqueDays uint64
-		var avgEvPerSess, rev float64
+		var avgEvPerSess float64
+		var revCents int64
 		var firstSeen, lastSeen time.Time
 		if err := h.queryService.Conn().QueryRow(r.Context(), evQuery, profileID, profileID).Scan(
 			&totalEv, &totalSess, &screenViews, &avgEvPerSess, &convEv,
-			&firstSeen, &lastSeen, &uniqueDays, &rev,
+			&firstSeen, &lastSeen, &uniqueDays, &revCents,
 		); err == nil && totalEv > 0 {
+			targetCurrency := h.extractCurrency(r)
+			if h.currencyService != nil && targetCurrency != "USD" {
+				revCents = h.currencyService.ConvertFromUSD(revCents, targetCurrency)
+			}
 			metrics["totalEvents"] = totalEv
 			metrics["events"] = totalEv
 			metrics["sessions"] = totalSess
@@ -1872,7 +1935,7 @@ func (h *Handler) HandleTRPCProfileMetrics(w http.ResponseWriter, r *http.Reques
 			metrics["firstSeen"] = firstSeen.UTC().Format("2006-01-02T15:04:05.000Z")
 			metrics["lastSeen"] = lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
 			metrics["uniqueDaysActive"] = uniqueDays
-			metrics["revenue"] = rev
+			metrics["revenue"] = float64(revCents) / 100.0
 		}
 
 		sessQuery := fmt.Sprintf(`
@@ -2253,7 +2316,7 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 				any(referrer_name) as referrer_name,
 				toUInt32(count()) as events_count,
 				toUInt32(countIf(name = 'screen_view')) as screen_views_count,
-				toInt64(coalesce(sum(revenue), 0)) as total_revenue,
+				toInt64(coalesce(sum(revenue_usd), 0)) as total_revenue,
 				any(country) as country,
 				any(city) as city,
 				any(os) as os,
@@ -2275,6 +2338,10 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 			&evCount, &screenCount, &rev,
 			&country, &city, &osName, &browser, &device, &devID, &custID,
 		); err == nil && evCount > 0 {
+			targetCurrency := h.extractCurrency(r)
+			if h.currencyService != nil && targetCurrency != "USD" {
+				rev = h.currencyService.ConvertFromUSD(rev, targetCurrency)
+			}
 			if entryPath == "" {
 				entryPath = "/"
 			}
@@ -2300,6 +2367,7 @@ func (h *Handler) HandleTRPCSessionById(w http.ResponseWriter, r *http.Request) 
 			sess["screenViewCount"] = screenCount
 			sess["isBounce"] = evCount <= 1
 			sess["revenue"] = float64(rev) / 100.0
+			sess["currency"] = targetCurrency
 			sess["country"] = country
 			sess["city"] = city
 			sess["os"] = osName
@@ -3174,7 +3242,8 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 			"eventCount":      s.EventsCount,
 			"screenViewCount": s.ScreenViewsCount,
 			"isBounce":        s.EventsCount <= 1,
-			"revenue":         float64(s.TotalRevenue) / 100.0,
+			"revenue":         float64(s.TotalRevenueUSD) / 100.0,
+			"revenueCents":    s.TotalRevenueUSD,
 			"country":         s.Country,
 			"city":            s.City,
 			"os":              s.OS,
@@ -3419,6 +3488,7 @@ func (h *Handler) HandleTRPCReportResetLayout(w http.ResponseWriter, r *http.Req
 func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
 	shopIDStr := shopID.String()
+	targetCurrency := h.extractCurrency(r)
 
 	type IntentItem struct {
 		Device           string  `json:"device"`
@@ -3427,7 +3497,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 		CustomerID       string  `json:"customerId"`
 		IsIdentified     bool    `json:"isIdentified"`
 		CartID           string  `json:"cartId"`
-		CartValue        float64 `json:"cartValue"`
+		CartValue        int64   `json:"cartValue"`
 		CartItems        int64   `json:"cartItems"`
 		Views            int64   `json:"views"`
 		Carts            int64   `json:"carts"`
@@ -3447,6 +3517,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 		PriceTier        string  `json:"priceTier"`
 		Status           string  `json:"status"`
 		Signals          string  `json:"signals"`
+		Currency         string  `json:"currency"`
 	}
 
 	results := make([]IntentItem, 0)
@@ -3573,9 +3644,13 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				priceTier = "MODERATE"
 			}
 
+			if h.currencyService != nil && targetCurrency != "USD" {
+				cartCents = h.currencyService.ConvertFromUSD(cartCents, targetCurrency)
+			}
+
 			signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
 			if cartID != "" && carts > 0 {
-				signals = fmt.Sprintf("Active Cart ($%.2f • %d items), %s", float64(cartCents)/100.0, carts, intentTier)
+				signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", float64(cartCents)/100.0, targetCurrency, carts, intentTier)
 			} else if val >= 0.85 {
 				signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", val*100, carts)
 			}
@@ -3603,7 +3678,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				CustomerID:       custID,
 				IsIdentified:     custID != "" && custID != "00000000-0000-0000-0000-000000000000",
 				CartID:           cartID,
-				CartValue:        float64(cartCents) / 100.0,
+				CartValue:        cartCents,
 				CartItems:        carts,
 				Views:            views,
 				Carts:            carts,
@@ -3623,6 +3698,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				PriceTier:        priceTier,
 				Status:           status,
 				Signals:          signals,
+				Currency:         targetCurrency,
 			})
 		}
 	}
@@ -3717,9 +3793,13 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						hasReplay = rCount > 0
 					}
 
+					if h.currencyService != nil && targetCurrency != "USD" {
+						totRev = h.currencyService.ConvertFromUSD(totRev, targetCurrency)
+					}
+
 					signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
 					if crtID != "" && crtID != "00000000-0000-0000-0000-000000000000" {
-						signals = fmt.Sprintf("Active Cart ($%.2f • %d items), %s", float64(totRev)/100.0, carts, intentTier)
+						signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", float64(totRev)/100.0, targetCurrency, carts, intentTier)
 					}
 
 					profID := cID
@@ -3734,7 +3814,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						CustomerID:       cID,
 						IsIdentified:     cID != "" && cID != "00000000-0000-0000-0000-000000000000",
 						CartID:           crtID,
-						CartValue:        float64(totRev) / 100.0,
+						CartValue:        totRev,
 						CartItems:        int64(carts),
 						Views:            int64(views),
 						Carts:            int64(carts),
@@ -3754,6 +3834,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						PriceTier:        priceTier,
 						Status:           status,
 						Signals:          signals,
+						Currency:         targetCurrency,
 					})
 				}
 			}
@@ -4278,22 +4359,11 @@ func (h *Handler) HandleTRPCChart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleTRPCRealtimePaths(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	query := fmt.Sprintf(`
-		SELECT
-			origin,
-			path,
-			COUNT(*) as count,
-			COUNT(DISTINCT session_id) as unique_sessions,
-			round(avg(coalesce(revenue, 0))/100, 2) as avg_duration
-		FROM %s.events
-		WHERE tenant_id = ? AND shop_id = ?
-		  AND path != ''
-		  AND created_at >= now() - INTERVAL 24 HOUR
-		GROUP BY path, origin
-		ORDER BY count DESC
-		LIMIT 50
-	`, h.queryService.database)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCResponse(w, []any{})
+		return
+	}
 
 	type PathItem struct {
 		Origin         string  `json:"origin"`
@@ -4302,19 +4372,48 @@ func (h *Handler) HandleTRPCRealtimePaths(w http.ResponseWriter, r *http.Request
 		UniqueSessions int64   `json:"unique_sessions"`
 		AvgDuration    float64 `json:"avg_duration"`
 	}
-	var res []PathItem
-	if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var p PathItem
-			var c, us uint64
-			if err := rows.Scan(&p.Origin, &p.Path, &c, &us, &p.AvgDuration); err == nil {
-				p.Count = int64(c)
-				p.UniqueSessions = int64(us)
-				res = append(res, p)
+
+	runQuery := func(intervalClause string) []PathItem {
+		query := fmt.Sprintf(`
+			SELECT
+				origin,
+				path,
+				COUNT(*) as count,
+				COUNT(DISTINCT session_id) as unique_sessions,
+				0.0 as avg_duration
+			FROM %s.events
+			WHERE (tenant_id = ? OR shop_id = ?)
+			  AND path != ''
+			  %s
+			GROUP BY path, origin
+			ORDER BY count DESC
+			LIMIT 50
+		`, h.queryService.database, intervalClause)
+
+		var items []PathItem
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var p PathItem
+				var c, us uint64
+				if err := rows.Scan(&p.Origin, &p.Path, &c, &us, &p.AvgDuration); err == nil {
+					p.Count = int64(c)
+					p.UniqueSessions = int64(us)
+					items = append(items, p)
+				}
 			}
 		}
+		return items
 	}
+
+	res := runQuery("AND created_at >= now() - INTERVAL 24 HOUR")
+	if len(res) == 0 {
+		res = runQuery("AND created_at >= now() - INTERVAL 7 DAY")
+	}
+	if len(res) == 0 {
+		res = runQuery("")
+	}
+
 	if res == nil {
 		res = []PathItem{}
 	}
@@ -4322,22 +4421,11 @@ func (h *Handler) HandleTRPCRealtimePaths(w http.ResponseWriter, r *http.Request
 }
 
 func (h *Handler) HandleTRPCRealtimeCoordinates(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	query := fmt.Sprintf(`
-		SELECT
-			country,
-			city,
-			coalesce(longitude, -97.82) as long,
-			coalesce(latitude, 37.75) as lat,
-			COUNT(DISTINCT session_id) as count
-		FROM %s.events
-		WHERE tenant_id = ? AND shop_id = ?
-		  AND created_at >= now() - INTERVAL 24 HOUR
-		  AND (latitude IS NOT NULL OR (country != '' AND country != '\0\0'))
-		GROUP BY country, city, long, lat
-		ORDER BY count DESC
-		LIMIT 500
-	`, h.queryService.database)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCResponse(w, []any{})
+		return
+	}
 
 	type Coord struct {
 		Country string  `json:"country"`
@@ -4346,18 +4434,48 @@ func (h *Handler) HandleTRPCRealtimeCoordinates(w http.ResponseWriter, r *http.R
 		Lat     float64 `json:"lat"`
 		Count   int64   `json:"count"`
 	}
-	var res []Coord
-	if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var c Coord
-			var uCount uint64
-			if err := rows.Scan(&c.Country, &c.City, &c.Long, &c.Lat, &uCount); err == nil {
-				c.Count = int64(uCount)
-				res = append(res, c)
+
+	runQuery := func(intervalClause string) []Coord {
+		query := fmt.Sprintf(`
+			SELECT
+				toString(country) as country,
+				city,
+				coalesce(longitude, -97.82) as long,
+				coalesce(latitude, 37.75) as lat,
+				COUNT(DISTINCT session_id) as count
+			FROM %s.events
+			WHERE (tenant_id = ? OR shop_id = ?)
+			  %s
+			  AND (latitude IS NOT NULL OR length(replaceRegexpAll(toString(country), '\\x00', '')) = 2)
+			GROUP BY country, city, long, lat
+			ORDER BY count DESC
+			LIMIT 500
+		`, h.queryService.database, intervalClause)
+
+		var items []Coord
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var c Coord
+				var uCount uint64
+				if err := rows.Scan(&c.Country, &c.City, &c.Long, &c.Lat, &uCount); err == nil {
+					c.Country = strings.Trim(c.Country, "\x00")
+					c.Count = int64(uCount)
+					items = append(items, c)
+				}
 			}
 		}
+		return items
 	}
+
+	res := runQuery("AND created_at >= now() - INTERVAL 24 HOUR")
+	if len(res) == 0 {
+		res = runQuery("AND created_at >= now() - INTERVAL 7 DAY")
+	}
+	if len(res) == 0 {
+		res = runQuery("")
+	}
+
 	if res == nil {
 		res = []Coord{}
 	}
@@ -4365,22 +4483,11 @@ func (h *Handler) HandleTRPCRealtimeCoordinates(w http.ResponseWriter, r *http.R
 }
 
 func (h *Handler) HandleTRPCRealtimeGeo(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	query := fmt.Sprintf(`
-		SELECT
-			country,
-			city,
-			COUNT(*) as count,
-			COUNT(DISTINCT session_id) as unique_sessions,
-			0.0 as avg_duration
-		FROM %s.events
-		WHERE tenant_id = ? AND shop_id = ?
-		  AND country != '' AND country != '\0\0'
-		  AND created_at >= now() - INTERVAL 24 HOUR
-		GROUP BY country, city
-		ORDER BY count DESC
-		LIMIT 50
-	`, h.queryService.database)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCResponse(w, []any{})
+		return
+	}
 
 	type GeoItem struct {
 		Country        string  `json:"country"`
@@ -4389,19 +4496,54 @@ func (h *Handler) HandleTRPCRealtimeGeo(w http.ResponseWriter, r *http.Request) 
 		UniqueSessions int64   `json:"unique_sessions"`
 		AvgDuration    float64 `json:"avg_duration"`
 	}
-	var res []GeoItem
-	if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var g GeoItem
-			var c, us uint64
-			if err := rows.Scan(&g.Country, &g.City, &c, &us, &g.AvgDuration); err == nil {
-				g.Count = int64(c)
-				g.UniqueSessions = int64(us)
-				res = append(res, g)
+
+	runQuery := func(intervalClause string) []GeoItem {
+		query := fmt.Sprintf(`
+			SELECT
+				toString(country) as country,
+				city,
+				COUNT(*) as count,
+				COUNT(DISTINCT session_id) as unique_sessions,
+				0.0 as avg_duration
+			FROM %s.events
+			WHERE (tenant_id = ? OR shop_id = ?)
+			  AND length(replaceRegexpAll(toString(country), '\\x00', '')) = 2
+			  %s
+			GROUP BY country, city
+			ORDER BY count DESC
+			LIMIT 50
+		`, h.queryService.database, intervalClause)
+
+		var items []GeoItem
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var g GeoItem
+				var c, us uint64
+				if err := rows.Scan(&g.Country, &g.City, &c, &us, &g.AvgDuration); err == nil {
+					g.Country = strings.Trim(g.Country, "\x00")
+					g.Count = int64(c)
+					g.UniqueSessions = int64(us)
+					items = append(items, g)
+				}
 			}
 		}
+		return items
 	}
+
+	// 1. First attempt: last 24 hours
+	res := runQuery("AND created_at >= now() - INTERVAL 24 HOUR")
+
+	// 2. Fallback: if no events in last 24h, broaden window to last 7 days so widget is never blank on recent test data
+	if len(res) == 0 {
+		res = runQuery("AND created_at >= now() - INTERVAL 7 DAY")
+	}
+
+	// 3. Fallback: all-time if still empty
+	if len(res) == 0 {
+		res = runQuery("")
+	}
+
 	if res == nil {
 		res = []GeoItem{}
 	}
@@ -4409,20 +4551,11 @@ func (h *Handler) HandleTRPCRealtimeGeo(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) HandleTRPCRealtimeReferrals(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
-	query := fmt.Sprintf(`
-		SELECT
-			coalesce(nullIf(referrer_name, ''), 'Direct') as referrer_name,
-			COUNT(*) as count,
-			COUNT(DISTINCT session_id) as unique_sessions,
-			0.0 as avg_duration
-		FROM %s.events
-		WHERE tenant_id = ? AND shop_id = ?
-		  AND created_at >= now() - INTERVAL 24 HOUR
-		GROUP BY referrer_name
-		ORDER BY count DESC
-		LIMIT 50
-	`, h.queryService.database)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCResponse(w, []any{})
+		return
+	}
 
 	type RefItem struct {
 		ReferrerName   string  `json:"referrer_name"`
@@ -4430,19 +4563,46 @@ func (h *Handler) HandleTRPCRealtimeReferrals(w http.ResponseWriter, r *http.Req
 		UniqueSessions int64   `json:"unique_sessions"`
 		AvgDuration    float64 `json:"avg_duration"`
 	}
-	var res []RefItem
-	if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var rf RefItem
-			var c, us uint64
-			if err := rows.Scan(&rf.ReferrerName, &c, &us, &rf.AvgDuration); err == nil {
-				rf.Count = int64(c)
-				rf.UniqueSessions = int64(us)
-				res = append(res, rf)
+
+	runQuery := func(intervalClause string) []RefItem {
+		query := fmt.Sprintf(`
+			SELECT
+				coalesce(nullIf(referrer_name, ''), 'Direct') as referrer_name,
+				COUNT(*) as count,
+				COUNT(DISTINCT session_id) as unique_sessions,
+				0.0 as avg_duration
+			FROM %s.events
+			WHERE (tenant_id = ? OR shop_id = ?)
+			  %s
+			GROUP BY referrer_name
+			ORDER BY count DESC
+			LIMIT 50
+		`, h.queryService.database, intervalClause)
+
+		var items []RefItem
+		if rows, err := h.queryService.Conn().Query(r.Context(), query, tenantID, shopID); err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var rf RefItem
+				var c, us uint64
+				if err := rows.Scan(&rf.ReferrerName, &c, &us, &rf.AvgDuration); err == nil {
+					rf.Count = int64(c)
+					rf.UniqueSessions = int64(us)
+					items = append(items, rf)
+				}
 			}
 		}
+		return items
 	}
+
+	res := runQuery("AND created_at >= now() - INTERVAL 24 HOUR")
+	if len(res) == 0 {
+		res = runQuery("AND created_at >= now() - INTERVAL 7 DAY")
+	}
+	if len(res) == 0 {
+		res = runQuery("")
+	}
+
 	if res == nil {
 		res = []RefItem{}
 	}
@@ -4892,11 +5052,7 @@ func (h *Handler) getMetaRepo() *meta.Repository {
 	if h.metaRepo != nil {
 		return h.metaRepo
 	}
-	var conn driver.Conn
-	if h.queryService != nil {
-		conn = h.queryService.Conn()
-	}
-	h.metaRepo = meta.NewRepository(conn, h.rdb)
+	h.metaRepo = meta.NewRepository(h.pgPool, h.rdb)
 	return h.metaRepo
 }
 

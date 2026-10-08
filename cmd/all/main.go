@@ -11,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -20,12 +19,14 @@ import (
 	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/config"
 	"openanalytics/internal/cron"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/ingest"
 	"openanalytics/internal/integrations/meta"
 	"openanalytics/internal/kafka"
 	"openanalytics/internal/ml"
+	"openanalytics/internal/postgres"
 	"openanalytics/internal/query"
 	"openanalytics/internal/session"
 	"openanalytics/pkg/httputil"
@@ -106,13 +107,24 @@ func main() {
 	}
 
 	// ------------------------------------------------------------------
-	// 2b. Initialize Meta Conversions API (CAPI) Integration Engine
+	// 2b. Initialize PostgreSQL, Exchange Rates & Meta CAPI Engines
 	// ------------------------------------------------------------------
-	var chConn driver.Conn
-	if chWriter != nil {
-		chConn = chWriter.Conn()
+	pgPool, err := postgres.NewPool(ctx, cfg.PostgresURL, cfg.PostgresMaxConns)
+	if err != nil {
+		log.Printf("[Postgres] Warning: could not connect to PostgreSQL: %v", err)
+	} else {
+		defer pgPool.Close()
+		if err := postgres.Migrate(ctx, pgPool); err != nil {
+			log.Printf("[Postgres] Warning: schema migration error: %v", err)
+		}
 	}
-	metaRepo := meta.NewRepository(chConn, rdb)
+
+	currencyService := currency.NewService(pgPool, rdb)
+	_ = currencyService.LoadRates(ctx)
+	currencyScheduler := currency.NewScheduler(cfg.OpenExchangeRatesAppID, pgPool, rdb, currencyService, cfg.ExchangeRateSyncHours)
+	currencyScheduler.Start(ctx)
+
+	metaRepo := meta.NewRepository(pgPool, rdb)
 	metaClient := meta.NewClient("")
 	metaService := meta.NewService(ctx, metaRepo, metaClient)
 	defer metaService.Close()
@@ -122,12 +134,13 @@ func main() {
 	// 3. Start Ingestion Engine (:8080)
 	// ------------------------------------------------------------------
 	ingestHandler := ingest.NewHandler(ingest.Config{
-		GeoService:  geoService,
-		Producer:    kafkaProducer,
-		RedisClient: rdb,
-		Salt:        "aicart_openanalytics_salt",
-		CHWriter:    chWriter,
-		SessionMgr:  sessionMgr,
+		GeoService:      geoService,
+		Producer:        kafkaProducer,
+		RedisClient:     rdb,
+		Salt:            "aicart_openanalytics_salt",
+		CHWriter:        chWriter,
+		SessionMgr:      sessionMgr,
+		CurrencyService: currencyService,
 		OnEvent: func(event *domain.Event) {
 			metaService.DispatchAsync(event)
 		},
@@ -140,7 +153,7 @@ func main() {
 	ingestRouter.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID", "X-Currency"},
 		AllowCredentials: false,
 		MaxAge:           86400 * 7,
 	}))
@@ -193,13 +206,14 @@ func main() {
 	if err != nil {
 		log.Printf("[Query Engine] Warning: ClickHouse query service init error: %v", err)
 	} else {
+		qs.WithCurrency(currencyService)
 		defer qs.Close()
 	}
 
 	wsHub := query.NewWebSocketHub(rdb, qs)
 	wsHub.Start(ctx)
 
-	queryHandler := query.NewHandler(qs).WithRedis(rdb).WithWSHub(wsHub).WithMetaIntegration(metaRepo, metaClient)
+	queryHandler := query.NewHandler(qs).WithRedis(rdb).WithWSHub(wsHub).WithMetaIntegration(metaRepo, metaClient).WithPostgres(pgPool).WithCurrency(currencyService)
 
 	// ------------------------------------------------------------------
 	// 5. Start Stream Worker (Kafka Partition Consumer)
@@ -275,7 +289,7 @@ func main() {
 	queryRouter.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Tenant-ID", "X-Shop-ID", "X-AUTH-KEY"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Tenant-ID", "X-Shop-ID", "X-AUTH-KEY", "X-Currency"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))

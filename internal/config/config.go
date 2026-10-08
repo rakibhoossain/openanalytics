@@ -42,6 +42,14 @@ type Config struct {
 	MLModelPath        string
 	MLInferenceEnabled bool
 
+	// PostgreSQL Storage
+	PostgresURL      string
+	PostgresMaxConns int
+
+	// Currency & Exchange Rates
+	OpenExchangeRatesAppID string
+	ExchangeRateSyncHours  int
+
 	// Security
 	AuthKey string
 }
@@ -60,6 +68,12 @@ func Load() *Config {
 		ClickHouseDatabase: getEnv("CLICKHOUSE_DATABASE", "openpanel"),
 		ClickHouseUsername: getEnv("CLICKHOUSE_USERNAME", "openpanel"),
 		ClickHousePassword: getEnv("CLICKHOUSE_PASSWORD", "openpanel"),
+
+		PostgresURL:      getEnv("POSTGRES_URL", "postgresql://postgres:postgres@localhost:5432/analytics_db?sslmode=disable"),
+		PostgresMaxConns: getEnvAsInt("POSTGRES_MAX_CONNS", 25),
+
+		OpenExchangeRatesAppID: getEnv("OPENEXCHANGERATES_APP_ID", ""),
+		ExchangeRateSyncHours:  getEnvAsInt("EXCHANGE_RATE_SYNC_HOURS", 6),
 
 		RedisAddr:              getEnv("REDIS_ADDR", "127.0.0.1:6380"),
 		RedisPassword:          getEnv("REDIS_PASSWORD", ""),

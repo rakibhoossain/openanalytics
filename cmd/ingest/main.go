@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/config"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/geo"
 	"openanalytics/internal/ingest"
 	"openanalytics/internal/kafka"
@@ -67,12 +68,16 @@ func main() {
 		log.Printf("[Redis] Connected to %s", cfg.RedisAddr)
 	}
 
-	// 4. Initialize Ingest Handler
+	// 4. Initialize Currency & Ingest Handler
+	currencyService := currency.NewService(nil, rdb)
+	_ = currencyService.LoadRates(ctx)
+
 	ingestHandler := ingest.NewHandler(ingest.Config{
-		GeoService:  geoService,
-		Producer:    producer,
-		RedisClient: rdb,
-		Salt:        "aicart_openanalytics_salt",
+		GeoService:      geoService,
+		Producer:        producer,
+		RedisClient:     rdb,
+		Salt:            "aicart_openanalytics_salt",
+		CurrencyService: currencyService,
 	})
 
 	// 5. Configure Go-Chi Router & Middleware

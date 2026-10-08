@@ -125,7 +125,7 @@ func (r *Reaper) reapIdleSessions(ctx context.Context) {
 			eventsCount, _ := strconv.ParseUint(sData["events_count"], 10, 32)
 			hasCart, _ := strconv.ParseUint(sData["has_cart_add"], 10, 8)
 			hasPurchase, _ := strconv.ParseUint(sData["has_purchase"], 10, 8)
-			totalRevenue, _ := strconv.ParseInt(sData["total_revenue"], 10, 64)
+			totalRevenueUSD, _ := strconv.ParseInt(sData["total_revenue_usd"], 10, 64)
 
 			durationSec := uint32(0)
 			if lastSeenMs > startedMs {
@@ -136,22 +136,22 @@ func (r *Reaper) reapIdleSessions(ctx context.Context) {
 			startedAt := time.UnixMilli(startedMs).UTC()
 
 			closedSession := &domain.Session{
-				ID:           sessionID,
-				TenantID:     tenantUUID,
-				ShopID:       shopUUID,
-				DeviceID:     deviceID,
-				StartedAt:    startedAt,
-				EndedAt:      endedAt,
-				Duration:     durationSec,
-				EntryPath:    sData["entry_path"],
-				ExitPath:     sData["exit_path"],
-				Referrer:     sData["referrer"],
-				ReferrerName: sData["referrer_name"],
-				ReferrerType: sData["referrer_type"],
-				EventsCount:  uint32(eventsCount),
-				HasCartAdd:   hasCart > 0,
-				HasPurchase:  hasPurchase > 0,
-				TotalRevenue: totalRevenue,
+				ID:              sessionID,
+				TenantID:        tenantUUID,
+				ShopID:          shopUUID,
+				DeviceID:        deviceID,
+				StartedAt:       startedAt,
+				EndedAt:         endedAt,
+				Duration:        durationSec,
+				EntryPath:       sData["entry_path"],
+				ExitPath:        sData["exit_path"],
+				Referrer:        sData["referrer"],
+				ReferrerName:    sData["referrer_name"],
+				ReferrerType:    sData["referrer_type"],
+				EventsCount:     uint32(eventsCount),
+				HasCartAdd:      hasCart > 0,
+				HasPurchase:     hasPurchase > 0,
+				TotalRevenueUSD: totalRevenueUSD,
 			}
 
 			// 1. Emit synthetic session_end event

@@ -6,27 +6,27 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
-// Repository manages persistence and caching of integration credentials.
+// Repository manages persistence and caching of integration credentials in PostgreSQL.
 type Repository struct {
-	conn driver.Conn
+	pool *pgxpool.Pool
 	rdb  *redis.Client
 }
 
-// NewRepository initializes a Repository with ClickHouse and Redis dependencies.
-func NewRepository(conn driver.Conn, rdb *redis.Client) *Repository {
+// NewRepository initializes a Repository with PostgreSQL and Redis dependencies.
+func NewRepository(pool *pgxpool.Pool, rdb *redis.Client) *Repository {
 	return &Repository{
-		conn: conn,
+		pool: pool,
 		rdb:  rdb,
 	}
 }
 
 // GetMetaIntegration retrieves the Meta CAPI integration for a shop.
-// Checks Redis cache first (sub-millisecond), falling back to ClickHouse.
+// Checks Redis cache first (sub-millisecond), falling back to PostgreSQL.
 func (r *Repository) GetMetaIntegration(ctx context.Context, shopID uuid.UUID) (*ShopIntegration, error) {
 	if shopID == uuid.Nil {
 		return nil, nil
@@ -48,24 +48,22 @@ func (r *Repository) GetMetaIntegration(ctx context.Context, shopID uuid.UUID) (
 		}
 	}
 
-	if r.conn == nil {
+	if r.pool == nil {
 		return nil, nil
 	}
 
-	// 2. Query ClickHouse
+	// 2. Query PostgreSQL
 	query := `
 		SELECT shop_id, tenant_id, provider, enabled, credentials, events_whitelist, updated_at
-		FROM openpanel.shop_integrations
-		WHERE shop_id = ? AND provider = 'meta_capi'
-		ORDER BY updated_at DESC
+		FROM shop_integrations
+		WHERE shop_id = $1 AND provider = 'meta_capi'
 		LIMIT 1
 	`
-	row := r.conn.QueryRow(ctx, query, shopID)
+	row := r.pool.QueryRow(ctx, query, shopID)
 
 	var item ShopIntegration
-	var enabledVal uint8
-	var credStr string
-	if err := row.Scan(&item.ShopID, &item.TenantID, &item.Provider, &enabledVal, &credStr, &item.EventsWhitelist, &item.UpdatedAt); err != nil {
+	var credBytes []byte
+	if err := row.Scan(&item.ShopID, &item.TenantID, &item.Provider, &item.Enabled, &credBytes, &item.EventsWhitelist, &item.UpdatedAt); err != nil {
 		// Cache negative lookup in Redis for 1 minute to prevent query flooding
 		if r.rdb != nil {
 			r.rdb.Set(ctx, redisKey, "{}", 1*time.Minute)
@@ -73,9 +71,8 @@ func (r *Repository) GetMetaIntegration(ctx context.Context, shopID uuid.UUID) (
 		return nil, nil
 	}
 
-	item.Enabled = (enabledVal == 1)
-	if credStr != "" {
-		_ = json.Unmarshal([]byte(credStr), &item.Credentials)
+	if len(credBytes) > 0 {
+		_ = json.Unmarshal(credBytes, &item.Credentials)
 	}
 
 	// 3. Populate Redis Cache
@@ -88,7 +85,7 @@ func (r *Repository) GetMetaIntegration(ctx context.Context, shopID uuid.UUID) (
 	return &item, nil
 }
 
-// SaveMetaIntegration persists Meta credentials to ClickHouse and updates Redis.
+// SaveMetaIntegration persists Meta credentials to PostgreSQL with ACID upsert and updates Redis.
 func (r *Repository) SaveMetaIntegration(ctx context.Context, item *ShopIntegration) error {
 	if item == nil {
 		return fmt.Errorf("integration cannot be nil")
@@ -105,19 +102,19 @@ func (r *Repository) SaveMetaIntegration(ctx context.Context, item *ShopIntegrat
 		return fmt.Errorf("failed to serialize credentials: %w", err)
 	}
 
-	enabledVal := uint8(0)
-	if item.Enabled {
-		enabledVal = 1
-	}
-
-	if r.conn != nil {
+	if r.pool != nil {
 		query := `
-			INSERT INTO openpanel.shop_integrations 
-			(shop_id, tenant_id, provider, enabled, credentials, events_whitelist, updated_at) 
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO shop_integrations 
+				(shop_id, tenant_id, provider, enabled, credentials, events_whitelist, updated_at) 
+			VALUES ($1, $2, $3, $4, $5, $6, NOW())
+			ON CONFLICT (shop_id, provider) DO UPDATE SET
+				enabled = EXCLUDED.enabled,
+				credentials = EXCLUDED.credentials,
+				events_whitelist = EXCLUDED.events_whitelist,
+				updated_at = NOW()
 		`
-		if err := r.conn.Exec(ctx, query, item.ShopID, item.TenantID, item.Provider, enabledVal, string(credBytes), item.EventsWhitelist, item.UpdatedAt); err != nil {
-			return fmt.Errorf("failed to write integration to ClickHouse: %w", err)
+		if _, err := r.pool.Exec(ctx, query, item.ShopID, item.TenantID, item.Provider, item.Enabled, credBytes, item.EventsWhitelist); err != nil {
+			return fmt.Errorf("failed to write integration to PostgreSQL: %w", err)
 		}
 	}
 

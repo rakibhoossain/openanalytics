@@ -238,7 +238,7 @@ func (w *BatchWriter) Flush(ctx context.Context) error {
 func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain.Event) error {
 	query := fmt.Sprintf(`INSERT INTO %s.events (
 		id, tenant_id, shop_id, name, device_id, customer_id, session_id,
-		revenue, currency, product_id, cart_id, order_id, path, origin,
+		revenue, currency, revenue_usd, product_id, cart_id, order_id, path, origin,
 		referrer, referrer_name, referrer_type, os, browser, device,
 		country, city, latitude, longitude, properties, created_at
 	)`, w.database)
@@ -279,6 +279,7 @@ func (w *BatchWriter) flushEventsWithRetry(ctx context.Context, events []*domain
 			ev.SessionID,
 			rev,
 			ev.Currency,
+			ev.RevenueUSD,
 			ev.ProductID,
 			ev.CartID,
 			ev.OrderID,
@@ -310,7 +311,7 @@ func (w *BatchWriter) flushSessionsWithRetry(ctx context.Context, sessions []*do
 		id, tenant_id, shop_id, device_id, customer_id,
 		started_at, ended_at, duration, entry_path, exit_path,
 		referrer, referrer_name, referrer_type, events_count,
-		has_cart_add, has_purchase, total_revenue
+		has_cart_add, has_purchase, total_revenue_usd
 	)`, w.database)
 
 	batch, err := w.conn.PrepareBatch(ctx, query)
@@ -345,7 +346,7 @@ func (w *BatchWriter) flushSessionsWithRetry(ctx context.Context, sessions []*do
 			s.EventsCount,
 			hasCart,
 			hasPurch,
-			s.TotalRevenue,
+			s.TotalRevenueUSD,
 		)
 		if err != nil {
 			return fmt.Errorf("failed to append session to batch: %w", err)

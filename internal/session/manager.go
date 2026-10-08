@@ -85,7 +85,7 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 			local closed_entry_path = redis.call('HGET', key, 'entry_path')
 			local closed_has_cart = redis.call('HGET', key, 'has_cart_add')
 			local closed_has_purchase = redis.call('HGET', key, 'has_purchase')
-			local closed_revenue = redis.call('HGET', key, 'total_revenue')
+			local closed_revenue = redis.call('HGET', key, 'total_revenue_usd')
 
 			-- Initialize fresh session with full device & context metadata
 			redis.call('HMSET', key,
@@ -108,7 +108,7 @@ func NewManager(rdb *redis.Client, timeout time.Duration) *Manager {
 				'city', city,
 				'has_cart_add', 0,
 				'has_purchase', 0,
-				'total_revenue', 0
+				'total_revenue_usd', 0
 			)
 			redis.call('EXPIRE', key, math.floor(timeout_ms / 1000) * 2)
 
@@ -216,8 +216,8 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 	}
 	if event.Name == "purchase" || event.Name == "order_completed" {
 		_ = m.rdb.HSet(ctx, sessionKey, "has_purchase", 1).Err()
-		if event.Revenue != nil {
-			_ = m.rdb.HIncrBy(ctx, sessionKey, "total_revenue", *event.Revenue).Err()
+		if event.RevenueUSD != nil {
+			_ = m.rdb.HIncrBy(ctx, sessionKey, "total_revenue_usd", *event.RevenueUSD).Err()
 		}
 	}
 
@@ -242,23 +242,23 @@ func (m *Manager) Ingest(ctx context.Context, event *domain.Event) (*IngestResul
 		_, _ = fmt.Sscan(fmt.Sprint(res[15]), &totRev)
 
 		closedSession = &domain.Session{
-			ID:           closedID,
-			TenantID:     event.TenantID,
-			ShopID:       event.ShopID,
-			DeviceID:     event.DeviceID,
-			CustomerID:   event.CustomerID,
-			StartedAt:    time.UnixMilli(startedMs).UTC(),
-			EndedAt:      time.UnixMilli(endedMs).UTC(),
-			Duration:     durationSec,
-			EntryPath:    fmt.Sprint(res[12]),
-			ExitPath:     fmt.Sprint(res[12]),
-			Referrer:     fmt.Sprint(res[9]),
-			ReferrerName: fmt.Sprint(res[10]),
-			ReferrerType: fmt.Sprint(res[11]),
-			EventsCount:  eventsCount,
-			HasCartAdd:   hasCart > 0,
-			HasPurchase:  hasPurchase > 0,
-			TotalRevenue: totRev,
+			ID:              closedID,
+			TenantID:        event.TenantID,
+			ShopID:          event.ShopID,
+			DeviceID:        event.DeviceID,
+			CustomerID:      event.CustomerID,
+			StartedAt:       time.UnixMilli(startedMs).UTC(),
+			EndedAt:         time.UnixMilli(endedMs).UTC(),
+			Duration:        durationSec,
+			EntryPath:       fmt.Sprint(res[12]),
+			ExitPath:        fmt.Sprint(res[12]),
+			Referrer:        fmt.Sprint(res[9]),
+			ReferrerName:    fmt.Sprint(res[10]),
+			ReferrerType:    fmt.Sprint(res[11]),
+			EventsCount:     eventsCount,
+			HasCartAdd:      hasCart > 0,
+			HasPurchase:     hasPurchase > 0,
+			TotalRevenueUSD: totRev,
 		}
 	}
 

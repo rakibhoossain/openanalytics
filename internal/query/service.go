@@ -13,13 +13,21 @@ import (
 	"github.com/google/uuid"
 
 	"openanalytics/internal/cron"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/domain"
 )
 
 // Service provides analytical query execution across ClickHouse tables.
 type Service struct {
-	conn     driver.Conn
-	database string
+	conn            driver.Conn
+	database        string
+	currencyService *currency.Service
+}
+
+// WithCurrency attaches currency service for dynamic exchange rate normalization.
+func (s *Service) WithCurrency(cs *currency.Service) *Service {
+	s.currencyService = cs
+	return s
 }
 
 // Config holds options for the analytics query service.
@@ -73,7 +81,7 @@ func (s *Service) Close() error {
 // --- Query Implementations ---
 
 // GetTrends computes time-series aggregated metrics for a merchant shop.
-func (s *Service) GetTrends(ctx context.Context, tenantID, shopID uuid.UUID, metric, timeRange, interval string) ([]domain.TrendDataPoint, error) {
+func (s *Service) GetTrends(ctx context.Context, tenantID, shopID uuid.UUID, metric, timeRange, interval string, targetCurrency ...string) ([]domain.TrendDataPoint, error) {
 	// CRITICAL(tenant-isolation): Enforce tenant_id and shop_id on every ClickHouse query.
 	// ClickHouse ORDER BY (tenant_id, shop_id, ...) allows primary index skipping for ultra-fast scans.
 	now := time.Now().UTC()
@@ -110,8 +118,8 @@ func (s *Service) GetTrends(ctx context.Context, tenantID, shopID uuid.UUID, met
 		metricExpr = "count()"
 		whereClause = "AND name IN ('purchase', 'order_completed')"
 	case "revenue":
-		metricExpr = "coalesce(sum(revenue), 0)"
-		whereClause = "AND revenue IS NOT NULL"
+		metricExpr = "coalesce(sum(revenue_usd), 0)"
+		whereClause = "AND revenue_usd IS NOT NULL"
 	case "page_views":
 		fallthrough
 	default:
@@ -142,6 +150,18 @@ func (s *Service) GetTrends(ctx context.Context, tenantID, shopID uuid.UUID, met
 			return nil, err
 		}
 		points = append(points, pt)
+	}
+
+	if metric == "revenue" && len(targetCurrency) > 0 && s.currencyService != nil {
+		tgt := strings.ToUpper(strings.TrimSpace(targetCurrency[0]))
+		if tgt != "" && tgt != "USD" {
+			rate := s.currencyService.GetRate(tgt)
+			if rate > 0 {
+				for i := range points {
+					points[i].Value = math.Round(points[i].Value * rate)
+				}
+			}
+		}
 	}
 
 	return points, rows.Err()
@@ -552,7 +572,7 @@ func resolveIntervalFunc(interval, timeRange string) string {
 }
 
 // GetOverviewStats retrieves multi-metric overview KPIs and time-series for current & previous periods.
-func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UUID, timeRange, interval, startDateStr, endDateStr string) (*domain.OverviewStatsResult, error) {
+func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UUID, timeRange, interval, startDateStr, endDateStr string, targetCurrency ...string) (*domain.OverviewStatsResult, error) {
 	curStart, curEnd, prevStart, prevEnd := resolveTimeRange(timeRange, startDateStr, endDateStr)
 	dateTrunc := resolveIntervalFunc(interval, timeRange)
 
@@ -563,7 +583,7 @@ func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UU
 			count() AS total_sessions,
 			coalesce(round(countIf(events_count <= 1 OR duration = 0) * 100.0 / nullIf(count(), 0), 2), 0.0) AS bounce_rate,
 			coalesce(round(avgIf(duration, duration > 0), 2), 0.0) AS avg_session_duration,
-			coalesce(sum(total_revenue), toInt64(0)) AS total_revenue
+			coalesce(sum(total_revenue_usd), toInt64(0)) AS total_revenue
 		FROM %s.sessions
 		WHERE tenant_id = ? AND shop_id = ? AND started_at BETWEEN ? AND ?
 	`, s.database)
@@ -620,7 +640,7 @@ func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UU
 			uniq(device_id) AS unique_visitors,
 			uniq(session_id) AS total_sessions,
 			countIf(name = 'page_view' OR name = 'screen_view') AS screen_views,
-			coalesce(sum(revenue), toInt64(0)) AS revenue
+			coalesce(sum(revenue_usd), toInt64(0)) AS revenue
 		FROM %s.events
 		WHERE tenant_id = ? AND shop_id = ? AND created_at BETWEEN ? AND ?
 		GROUP BY bucket
@@ -665,7 +685,7 @@ func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UU
 			uniq(device_id) AS unique_visitors,
 			uniq(session_id) AS total_sessions,
 			countIf(name = 'page_view' OR name = 'screen_view') AS screen_views,
-			coalesce(sum(revenue), toInt64(0)) AS revenue
+			coalesce(sum(revenue_usd), toInt64(0)) AS revenue
 		FROM %s.events
 		WHERE tenant_id = ? AND shop_id = ? AND created_at BETWEEN ? AND ?
 		GROUP BY bucket
@@ -696,6 +716,22 @@ func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UU
 		}
 	}
 
+	// Dynamic Currency Conversion: scale integer cents to target currency
+	resolvedCurrency := "USD"
+	if len(targetCurrency) > 0 && strings.TrimSpace(targetCurrency[0]) != "" {
+		resolvedCurrency = strings.ToUpper(strings.TrimSpace(targetCurrency[0]))
+	}
+	if s.currencyService != nil && resolvedCurrency != "USD" {
+		curTotalRevenue = s.currencyService.ConvertFromUSD(curTotalRevenue, resolvedCurrency)
+		prevTotalRevenue = s.currencyService.ConvertFromUSD(prevTotalRevenue, resolvedCurrency)
+		for _, pt := range seriesMap {
+			pt.TotalRevenue = s.currencyService.ConvertFromUSD(pt.TotalRevenue, resolvedCurrency)
+		}
+		for _, pt := range prevPoints {
+			pt.TotalRevenue = s.currencyService.ConvertFromUSD(pt.TotalRevenue, resolvedCurrency)
+		}
+	}
+
 	// Correlate current points with aligned previous points
 	finalSeries := make([]domain.OverviewSeriesPoint, 0)
 	for i, bucket := range seriesOrder {
@@ -718,6 +754,7 @@ func (s *Service) GetOverviewStats(ctx context.Context, tenantID, shopID uuid.UU
 	pViews := int64(prevScreenViews)
 
 	return &domain.OverviewStatsResult{
+		Currency: resolvedCurrency,
 		Metrics: domain.OverviewMetrics{
 			BounceRate:             curBounceRate,
 			UniqueVisitors:         int64(curUniqueVisitors),
@@ -747,7 +784,7 @@ func sanitizeFloat(f float64) float64 {
 }
 
 // GetTopGeneric aggregates dimensions like device, browser, os, or referrer_name.
-func (s *Service) GetTopGeneric(ctx context.Context, tenantID, shopID uuid.UUID, column, timeRange, startDateStr, endDateStr string, limit int) ([]domain.TopItem, error) {
+func (s *Service) GetTopGeneric(ctx context.Context, tenantID, shopID uuid.UUID, column, timeRange, startDateStr, endDateStr string, limit int, targetCurrency ...string) ([]domain.TopItem, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 10
 	}
@@ -772,7 +809,7 @@ func (s *Service) GetTopGeneric(ctx context.Context, tenantID, shopID uuid.UUID,
 			coalesce(nullIf(%s, ''), 'Unknown') AS name,
 			uniq(session_id) AS sessions,
 			countIf(name = 'page_view' OR name = 'screen_view') AS pageviews,
-			coalesce(sum(revenue), toInt64(0)) AS revenue
+			coalesce(sum(revenue_usd), toInt64(0)) AS revenue
 		FROM %s.events
 		WHERE tenant_id = ? AND shop_id = ? AND created_at BETWEEN ? AND ?
 		GROUP BY name
@@ -801,11 +838,20 @@ func (s *Service) GetTopGeneric(ctx context.Context, tenantID, shopID uuid.UUID,
 		}
 	}
 
+	if len(targetCurrency) > 0 && s.currencyService != nil {
+		tgt := strings.ToUpper(strings.TrimSpace(targetCurrency[0]))
+		if tgt != "" && tgt != "USD" {
+			for i := range items {
+				items[i].Revenue = s.currencyService.ConvertFromUSD(items[i].Revenue, tgt)
+			}
+		}
+	}
+
 	return items, nil
 }
 
 // GetTopPages aggregates top visited paths, entry paths, or exit paths.
-func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, mode, timeRange, startDateStr, endDateStr string, limit int) ([]domain.TopItem, error) {
+func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, mode, timeRange, startDateStr, endDateStr string, limit int, targetCurrency ...string) ([]domain.TopItem, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 10
 	}
@@ -818,7 +864,7 @@ func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, m
 				coalesce(nullIf(entry_path, ''), '/') AS name,
 				count() AS sessions,
 				sum(events_count) AS pageviews,
-				coalesce(sum(total_revenue), toInt64(0)) AS revenue
+				coalesce(sum(total_revenue_usd), toInt64(0)) AS revenue
 			FROM %s.sessions
 			WHERE tenant_id = ? AND shop_id = ? AND started_at BETWEEN ? AND ?
 			  AND entry_path != ''
@@ -832,7 +878,7 @@ func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, m
 				coalesce(nullIf(exit_path, ''), '/') AS name,
 				count() AS sessions,
 				sum(events_count) AS pageviews,
-				coalesce(sum(total_revenue), toInt64(0)) AS revenue
+				coalesce(sum(total_revenue_usd), toInt64(0)) AS revenue
 			FROM %s.sessions
 			WHERE tenant_id = ? AND shop_id = ? AND ended_at BETWEEN ? AND ?
 			  AND exit_path != ''
@@ -847,7 +893,7 @@ func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, m
 				coalesce(nullIf(path, ''), '/') AS name,
 				uniq(session_id) AS sessions,
 				count() AS pageviews,
-				coalesce(sum(revenue), toInt64(0)) AS revenue
+				coalesce(sum(revenue_usd), toInt64(0)) AS revenue
 			FROM %s.events
 			WHERE tenant_id = ? AND shop_id = ? AND created_at BETWEEN ? AND ?
 			  AND (name = 'page_view' OR name = 'screen_view' OR path != '')
@@ -875,6 +921,15 @@ func (s *Service) GetTopPages(ctx context.Context, tenantID, shopID uuid.UUID, m
 				Pageviews: int64(pvs),
 				Revenue:   rev,
 			})
+		}
+	}
+
+	if len(targetCurrency) > 0 && s.currencyService != nil {
+		tgt := strings.ToUpper(strings.TrimSpace(targetCurrency[0]))
+		if tgt != "" && tgt != "USD" {
+			for i := range items {
+				items[i].Revenue = s.currencyService.ConvertFromUSD(items[i].Revenue, tgt)
+			}
 		}
 	}
 
@@ -1105,7 +1160,7 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 			toUInt32(countIf(name = 'screen_view')) as screen_views_count,
 			toUInt8(countIf(name ILIKE '%%cart%%') > 0) as has_cart_add,
 			toUInt8(countIf(name ILIKE '%%purchase%%' OR name ILIKE '%%order%%') > 0) as has_purchase,
-			toInt64(coalesce(sum(revenue), 0)) as total_revenue,
+			toInt64(coalesce(sum(revenue_usd), 0)) as total_revenue_usd,
 			any(country) as country,
 			any(city) as city,
 			any(os) as os,
@@ -1132,9 +1187,10 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 			&sess.ID, &sess.TenantID, &sess.ShopID, &sess.DeviceID, &sess.CustomerID,
 			&sess.StartedAt, &sess.EndedAt, &sess.Duration,
 			&sess.EntryPath, &sess.ExitPath, &sess.Referrer, &sess.ReferrerName, &sess.ReferrerType,
-			&sess.EventsCount, &sess.ScreenViewsCount, &cartAdd, &purch, &sess.TotalRevenue,
+			&sess.EventsCount, &sess.ScreenViewsCount, &cartAdd, &purch, &sess.TotalRevenueUSD,
 			&sess.Country, &sess.City, &sess.OS, &sess.Browser, &sess.Device,
 		); err == nil {
+			sess.TotalRevenue = sess.TotalRevenueUSD
 			sess.HasCartAdd = cartAdd > 0
 			sess.HasPurchase = purch > 0
 			sessions = append(sessions, sess)

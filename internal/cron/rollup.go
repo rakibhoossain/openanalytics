@@ -32,7 +32,7 @@ func RunHourlyRollup(ctx context.Context, conn driver.Conn, lookbackHours int) e
 			countIf(name = 'view_product' OR name = 'page_view') AS pageviews,
 			countIf(name = 'add_to_cart') AS cart_adds,
 			countIf(name = 'purchase' OR name = 'order_completed') AS purchases,
-			sum(ifNull(revenue, 0)) AS gross_revenue
+			sum(ifNull(revenue_usd, ifNull(revenue, 0))) AS gross_revenue_usd
 		FROM openpanel.events
 		WHERE created_at >= ?
 		GROUP BY shop_id, tenant_id, hour;

@@ -17,6 +17,7 @@ import (
 	"openanalytics/internal/domain"
 	"openanalytics/internal/integrations/meta"
 	"openanalytics/internal/kafka"
+	"openanalytics/internal/postgres"
 	"openanalytics/internal/session"
 )
 
@@ -80,8 +81,15 @@ func main() {
 		reportingCron.Start(ctx)
 	}
 
-	// 3c. Initialize Meta Conversions API (CAPI) Integration Engine
-	metaRepo := meta.NewRepository(chWriter.Conn(), rdb)
+	// 3c. Initialize PostgreSQL & Meta Conversions API (CAPI) Integration Engine
+	pgPool, err := postgres.NewPool(ctx, cfg.PostgresURL, cfg.PostgresMaxConns)
+	if err != nil {
+		log.Printf("[Worker %s] Warning: postgres pool init: %v", workerID, err)
+	} else {
+		defer pgPool.Close()
+	}
+
+	metaRepo := meta.NewRepository(pgPool, rdb)
 	metaService := meta.NewService(ctx, metaRepo, nil)
 	defer metaService.Close()
 	log.Printf("[Worker %s] Meta CAPI forwarder service active", workerID)

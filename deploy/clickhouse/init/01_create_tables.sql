@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS openpanel.events (
     -- E-Commerce Telemetry (Revenue stored in exact integer cents, e.g. $1.78 = 178 cents)
     revenue Nullable(Int64) CODEC(T64, ZSTD(3)),
     currency LowCardinality(String),
+    revenue_usd Nullable(Int64) CODEC(T64, ZSTD(3)),
     product_id Nullable(UUID),               -- UUIDv7
     cart_id Nullable(UUID),                  -- UUIDv7
     order_id Nullable(UUID),                 -- UUIDv7
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS openpanel.sessions (
     events_count UInt32,
     has_cart_add UInt8,
     has_purchase UInt8,
-    total_revenue Int64 DEFAULT 0            -- Stored in integer cents
+    total_revenue_usd Int64 DEFAULT 0 CODEC(Delta(4), LZ4) -- Normalized base USD cents
 )
 ENGINE = ReplacingMergeTree(ended_at)
 PARTITION BY toYYYYMM(started_at)
@@ -78,7 +79,7 @@ CREATE TABLE IF NOT EXISTS openpanel.hourly_metrics (
     pageviews UInt32,
     cart_adds UInt32,
     purchases UInt32,
-    gross_revenue Int64 DEFAULT 0            -- Stored in integer cents
+    gross_revenue_usd Int64 DEFAULT 0 CODEC(T64, ZSTD(3)) -- Normalized base USD cents
 ) ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(hour)
 ORDER BY (tenant_id, shop_id, hour)
@@ -143,18 +144,6 @@ ORDER BY (tenant_id, shop_id, session_id, started_at, chunk_index)
 TTL toDateTime(started_at) + toIntervalDay(30)
 SETTINGS index_granularity = 8192;
 
--- OpenAnalytics Multi-Tenant Integrations (Meta CAPI, TikTok, Google Ads)
-CREATE TABLE IF NOT EXISTS openpanel.shop_integrations (
-    shop_id UUID,
-    tenant_id UUID,
-    provider LowCardinality(String),
-    enabled UInt8 DEFAULT 1,
-    credentials String,
-    events_whitelist Array(String),
-    updated_at DateTime64(3, 'UTC')
-) ENGINE = ReplacingMergeTree(updated_at)
-ORDER BY (tenant_id, shop_id, provider);
-
 -- Default Database Views (ensures DBeaver, IDEs, and tools querying 'default' DB see all data)
 CREATE VIEW IF NOT EXISTS default.events AS SELECT * FROM openpanel.events;
 CREATE VIEW IF NOT EXISTS default.sessions AS SELECT * FROM openpanel.sessions;
@@ -162,4 +151,3 @@ CREATE VIEW IF NOT EXISTS default.hourly_metrics AS SELECT * FROM openpanel.hour
 CREATE VIEW IF NOT EXISTS default.project_insights AS SELECT * FROM openpanel.project_insights;
 CREATE VIEW IF NOT EXISTS default.shopper_features AS SELECT * FROM openpanel.shopper_features;
 CREATE VIEW IF NOT EXISTS default.session_replay_chunks AS SELECT * FROM openpanel.session_replay_chunks;
-CREATE VIEW IF NOT EXISTS default.shop_integrations AS SELECT * FROM openpanel.shop_integrations;
