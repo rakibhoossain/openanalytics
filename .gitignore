@@ -26,6 +26,7 @@ data/models/*.onnx
 data/geo/
 data/postgres
 data/clickhouse
+data/redis
 
 # OS metadata
 .DS_Store
@@ -34,3 +35,4 @@ openanalytics.log
 server.log
 /ml/training/__pycache__
 /ui/assets
+/ml/__pycache__

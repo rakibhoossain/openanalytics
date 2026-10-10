@@ -1,0 +1,99 @@
+# ==============================================================================
+# OpenAnalytics Modular Microservices Multi-Target Dockerfile
+# Builds individual binaries for:
+#   - ingest:    High-throughput edge ingestion (port 8080)
+#   - query:     Analytical ClickHouse query engine (port 8081)
+#   - worker:    Kafka -> ClickHouse stream worker
+#   - ml-worker: Real-time behavioral ML inference stream scorer
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Base Go Builder Stage (Cached across all target services)
+# ------------------------------------------------------------------------------
+FROM golang:alpine AS builder
+
+WORKDIR /app
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Cache Go dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy application source
+COPY . .
+
+# Build Ingest Service Binary
+FROM builder AS build-ingest
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /bin/service ./cmd/ingest/main.go
+
+# Build Query Service Binary
+FROM builder AS build-query
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /bin/service ./cmd/query/main.go
+
+# Build Stream Worker Binary
+FROM builder AS build-worker
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /bin/service ./cmd/worker/main.go
+
+# Build ML Inference Worker Binary
+FROM builder AS build-ml-worker
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /bin/service ./cmd/ml-worker/main.go
+
+# ------------------------------------------------------------------------------
+# 2. Minimal Production Runtime Base
+# ------------------------------------------------------------------------------
+FROM alpine:3.20 AS base-runtime
+
+WORKDIR /app
+RUN apk add --no-cache ca-certificates tzdata curl && \
+    addgroup -g 1001 appgroup && \
+    adduser -u 1001 -G appgroup -s /bin/sh -D appuser
+
+# ------------------------------------------------------------------------------
+# Target: Ingest Service
+# ------------------------------------------------------------------------------
+FROM base-runtime AS ingest
+COPY --from=build-ingest /bin/service /app/openanalytics-ingest
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
+  CMD curl -f http://localhost:8080/healthz || exit 1
+ENTRYPOINT ["/app/openanalytics-ingest"]
+
+# ------------------------------------------------------------------------------
+# Target: Query Service
+# ------------------------------------------------------------------------------
+FROM base-runtime AS query
+COPY --from=build-query /bin/service /app/openanalytics-query
+USER appuser
+EXPOSE 8081
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+  CMD curl -f http://localhost:8081/ || exit 1
+ENTRYPOINT ["/app/openanalytics-query"]
+
+# ------------------------------------------------------------------------------
+# Target: Stream Worker
+# ------------------------------------------------------------------------------
+FROM base-runtime AS worker
+COPY --from=build-worker /bin/service /app/openanalytics-worker
+USER appuser
+ENTRYPOINT ["/app/openanalytics-worker"]
+
+# ------------------------------------------------------------------------------
+# Target: ML Worker
+# ------------------------------------------------------------------------------
+FROM base-runtime AS ml-worker
+COPY --from=build-ml-worker /bin/service /app/openanalytics-ml-worker
+USER appuser
+ENTRYPOINT ["/app/openanalytics-ml-worker"]

@@ -1,0 +1,28 @@
+# ==============================================================================
+# OpenAnalytics Automated ML Retraining Container
+# Runs periodically in background to extract ClickHouse traffic, retrain models,
+# export calibrated weights to /app/data/models, and signal Redis.
+# ==============================================================================
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install ML requirements
+COPY ml/requirements.txt /app/ml/requirements.txt
+RUN pip install --no-cache-dir -r /app/ml/requirements.txt \
+    redis clickhouse-connect
+
+# Copy source code and default data
+COPY ml /app/ml
+COPY data /app/data
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/ml
+
+ENTRYPOINT ["python3", "/app/ml/cron_retrain.py"]

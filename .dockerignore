@@ -1,0 +1,25 @@
+# Ignore local databases and persistent volumes
+data/
+data/clickhouse
+data/redis
+data/geo
+data/postgres
+
+# Ignore Git & metadata
+.git
+.github
+.DS_Store
+
+# Ignore logs
+*.log
+*.tmp
+
+# Ignore web and ui
+web/
+ui/
+
+# Ignore local binaries and build artifacts
+bin/
+*.exe
+*.test
+*.out

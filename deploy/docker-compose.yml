@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   # ==============================================================================
-  # 1. OLAP Storage Engine: ClickHouse
+  # 1. OLAP Storage Engine: ClickHouse (Official 26.8.8.8)
   # ==============================================================================
   clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:26.8.8.8
     container_name: op_clickhouse
     restart: unless-stopped
     ports:
@@ -17,17 +15,17 @@ services:
       CLICKHOUSE_PASSWORD: openpanel
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - ch_data:/var/lib/clickhouse
-      - ./clickhouse/init:/docker-entrypoint-initdb.d
+      - ../data/clickhouse:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 10s
+      test: ["CMD", "clickhouse-client", "--user", "openpanel", "--password", "openpanel", "--query", "SELECT 1"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   # ==============================================================================
   # 2. Ephemeral State & Cache: Redis
@@ -36,14 +34,14 @@ services:
     image: redis:7-alpine
     container_name: op_redis
     restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
+    command: redis-server --notify-keyspace-events Ex
     ports:
       - "6380:6379"
     volumes:
-      - redis_data:/data
+      - ../data/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
 
@@ -55,21 +53,49 @@ services:
     container_name: op_geoipupdate
     restart: unless-stopped
     environment:
-      GEOIPUPDATE_ACCOUNT_ID: ${GEOIPUPDATE_ACCOUNT_ID:-1234}
-      GEOIPUPDATE_LICENSE_KEY: ${GEOIPUPDATE_LICENSE_KEY:-your_license_key}
+      GEOIPUPDATE_ACCOUNT_ID: ${GEOIPUPDATE_ACCOUNT_ID:-}
+      GEOIPUPDATE_LICENSE_KEY: ${GEOIPUPDATE_LICENSE_KEY:-}
       GEOIPUPDATE_EDITION_IDS: "GeoLite2-City GeoLite2-ASN"
-      GEOIPUPDATE_FREQUENCY: "168" # Update every 7 days
+      GEOIPUPDATE_FREQUENCY: 168
     volumes:
-      - geo_data:/usr/share/GeoIP
+      - ../data/geo:/usr/share/GeoIP
 
   # ==============================================================================
-  # 4. OpenAnalytics Unified Backend (Go-Chi)
+  # 4. Ingest Microservice (cmd/ingest on port 8080)
   # ==============================================================================
-  openanalytics:
+  ingest:
     build:
       context: ..
-      dockerfile: deploy/docker/Dockerfile.unified
-    container_name: op_backend
+      dockerfile: deploy/docker/Dockerfile.services
+      target: ingest
+    container_name: op_ingest
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: production
+      LOG_LEVEL: info
+      INGEST_PORT: 8080
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+      KAFKA_EVENTS_TOPIC: ${KAFKA_EVENTS_TOPIC:-analytics.events.raw}
+      GEOIP_DATA_DIR: /usr/share/GeoIP
+      ANALYTICS_AUTH_KEY: ${ANALYTICS_AUTH_KEY:-}
+    volumes:
+      - ../data/geo:/usr/share/GeoIP:ro
+
+  # ==============================================================================
+  # 5. Query Microservice (cmd/query on port 8081 - Headless Analytics Engine)
+  # ==============================================================================
+  query:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.services
+      target: query
+    container_name: op_query
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -77,46 +103,93 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "8080:8080" # Ingest API
-      - "8081:8081" # Query & Admin API
-      - "9090:9090" # Prometheus Metrics
+      - "8081:8081"
     environment:
       ENV: production
       LOG_LEVEL: info
-      INGEST_PORT: 8080
       QUERY_PORT: 8081
-      METRICS_PORT: 9090
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-openpanel}
+      CLICKHOUSE_USERNAME: ${CLICKHOUSE_USERNAME:-openpanel}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-openpanel}
+      REDIS_ADDR: redis:6379
+      REDIS_SESSION_TTL_MINUTES: ${REDIS_SESSION_TTL_MINUTES:-30}
+      ANALYTICS_AUTH_KEY: ${ANALYTICS_AUTH_KEY:-}
+      OPENEXCHANGERATES_APP_ID: ${OPENEXCHANGERATES_APP_ID:-}
+
+  # ==============================================================================
+  # 6. Stream Worker (cmd/worker - Scalable: docker compose up --scale worker=3)
+  # ==============================================================================
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.services
+      target: worker
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENV: production
+      LOG_LEVEL: info
       CLICKHOUSE_ADDR: clickhouse:9000
       CLICKHOUSE_DATABASE: openpanel
       CLICKHOUSE_USERNAME: openpanel
       CLICKHOUSE_PASSWORD: openpanel
       REDIS_ADDR: redis:6379
-      REDIS_SESSION_TTL_MINUTES: 30
-      GEOIP_DATA_DIR: /usr/share/GeoIP
       KAFKA_BROKERS: ${KAFKA_BROKERS:-}
-      ML_INFERENCE_ENABLED: "true"
-      DEV_DEFAULT_COUNTRY: ${DEV_DEFAULT_COUNTRY:-US}
+      KAFKA_EVENTS_TOPIC: analytics.events.raw
+      KAFKA_CONSUMER_GROUP: openanalytics-worker-group
+      KAFKA_BATCH_SIZE: 5000
+
+  # ==============================================================================
+  # 7. Behavioral ML Worker (cmd/ml-worker - Scalable: --scale ml-worker=2)
+  # ==============================================================================
+  ml-worker:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.services
+      target: ml-worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      ENV: production
+      LOG_LEVEL: info
+      REDIS_ADDR: redis:6379
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+      KAFKA_EVENTS_TOPIC: analytics.events.raw
+      KAFKA_CONSUMER_GROUP: openanalytics-worker-group
+      ML_MODEL_PATH: /app/data/models/cart_intent_v1.json
     volumes:
-      - geo_data:/usr/share/GeoIP:ro
       - ../data/models:/app/data/models:ro
 
   # ==============================================================================
-  # 5. OpenAnalytics Web Dashboard (TanStack / Vite)
+  # 8. Automated ML Retraining Cron (Periodically retrains models on ClickHouse)
   # ==============================================================================
-  web:
+  ml-retrain:
+    profiles: ["ml-cron"]
     build:
       context: ..
-      dockerfile: deploy/docker/Dockerfile.web
-    container_name: op_web
+      dockerfile: deploy/docker/Dockerfile.ml-cron
+    container_name: op_ml_retrain
     restart: unless-stopped
     depends_on:
-      - openanalytics
-    ports:
-      - "3000:3000"
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
-      VITE_API_URL: http://openanalytics:8081
-
-volumes:
-  ch_data:
-  redis_data:
-  geo_data:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 9000
+      CLICKHOUSE_DB: openpanel
+      CLICKHOUSE_USER: openpanel
+      CLICKHOUSE_PASSWORD: openpanel
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RETRAIN_INTERVAL_HOURS: 24
+    volumes:
+      - ../data/models:/app/data/models

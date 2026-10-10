@@ -16,6 +16,7 @@ import (
 
 	"openanalytics/internal/config"
 	"openanalytics/internal/query"
+	"openanalytics/pkg/httputil"
 )
 
 func main() {
@@ -70,20 +71,13 @@ func main() {
 	handler := query.NewHandler(qs)
 	handler.RegisterRoutes(r)
 
-	// Redirect root / directly to /ui/
+	// Root status endpoint (headless analytics engine)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/", http.StatusFound)
-	})
-
-	// Serve Static UI Assets (resolving from current dir or openanalytics/)
-	uiPath := "ui"
-	if _, err := os.Stat(uiPath); os.IsNotExist(err) {
-		uiPath = "openanalytics/ui"
-	}
-	uiDir := http.Dir(uiPath)
-	r.Handle("/ui/*", http.StripPrefix("/ui", http.FileServer(uiDir)))
-	r.Get("/ui", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/ui/", http.StatusMovedPermanently)
+		httputil.JSON(w, http.StatusOK, map[string]any{
+			"service": "openanalytics-query",
+			"status":  "healthy",
+			"version": "1.0.0",
+		})
 	})
 
 	// 5. Start HTTP Server

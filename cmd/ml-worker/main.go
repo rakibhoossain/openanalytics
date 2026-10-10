@@ -51,6 +51,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[ML Worker] Fatal: failed to initialize scorer: %v", err)
 	}
+	scorer.StartAutoReloadListener(ctx, cfg.MLModelPath)
 
 	// 3. Initialize Kafka Consumer Group Reader
 	consumerGroup := cfg.KafkaConsumerGroup + "-ml"

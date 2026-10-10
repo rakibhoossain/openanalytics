@@ -199,9 +199,6 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Get("/project.getProjectWithClients", h.HandleTRPCProjectGet)
 		r.Get("/project.list", h.HandleTRPCProjectList)
 		r.Get("/client.list", h.HandleTRPCClientList)
-		r.Get("/organization.get", h.HandleTRPCOrganizationGet)
-		r.Get("/organization.list", h.HandleTRPCOrganizationList)
-		r.Get("/organization.myAccess", h.HandleTRPCOrganizationMyAccess)
 		r.Get("/auth.session", h.HandleTRPCAuthSession)
 		// Dashboard
 		r.Get("/dashboard.list", h.HandleTRPCDashboardList)
@@ -1432,20 +1429,6 @@ func (h *Handler) HandleTRPCClientList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) HandleTRPCOrganizationGet(w http.ResponseWriter, r *http.Request) {
-	tenantID, _, _ := h.extractTenantAndShop(r)
-	sendTRPCResponse(w, map[string]any{
-		"id":   tenantID.String(),
-		"name": "Default Organization",
-	})
-}
-
-func (h *Handler) HandleTRPCOrganizationMyAccess(w http.ResponseWriter, r *http.Request) {
-	sendTRPCResponse(w, map[string]any{
-		"role":  "org:admin",
-		"level": "admin",
-	})
-}
 
 func (h *Handler) HandleTRPCProjectList(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
@@ -2591,17 +2574,6 @@ func (h *Handler) HandleTRPCGroupById(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) HandleTRPCOrganizationList(w http.ResponseWriter, r *http.Request) {
-	tenantID, _, _ := h.extractTenantAndShop(r)
-	sendTRPCResponse(w, []map[string]any{
-		{
-			"id":                            tenantID.String(),
-			"name":                          "Default Organization",
-			"subscriptionPeriodEventsCount": 1000,
-			"subscriptionPeriodEventsLimit": 10000000,
-		},
-	})
-}
 
 func (h *Handler) HandleTRPCAuthSession(w http.ResponseWriter, r *http.Request) {
 	sendTRPCResponse(w, map[string]any{

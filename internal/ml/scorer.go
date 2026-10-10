@@ -146,6 +146,76 @@ func NewScorer(modelPath string, rdb *redis.Client) (*Scorer, error) {
 	}, nil
 }
 
+// ReloadWeights reloads calibrated weights from disk dynamically.
+func (s *Scorer) ReloadWeights(modelPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	jsonPath := modelPath
+	if len(jsonPath) > 5 && jsonPath[len(jsonPath)-5:] == ".onnx" {
+		jsonPath = jsonPath[:len(jsonPath)-5] + ".json"
+	}
+
+	if data, err := os.ReadFile(jsonPath); err == nil {
+		var w IntentModelWeights
+		if err := json.Unmarshal(data, &w); err == nil {
+			s.weights = w
+			log.Printf("[ML Scorer] Hot-reloaded intent model weights version %s from %s", w.Version, jsonPath)
+		}
+	}
+
+	dir := ""
+	for i := len(jsonPath) - 1; i >= 0; i-- {
+		if jsonPath[i] == '/' || jsonPath[i] == '\\' {
+			dir = jsonPath[:i]
+			break
+		}
+	}
+	if dir != "" {
+		churnPath := dir + "/churn_predictor_v1.json"
+		if cData, err := os.ReadFile(churnPath); err == nil {
+			var cw GenericModelWeights
+			if err := json.Unmarshal(cData, &cw); err == nil {
+				s.churnWeights = cw
+				log.Printf("[ML Scorer] Hot-reloaded churn predictor weights version %s", cw.Version)
+			}
+		}
+		pricePath := dir + "/price_sensitivity_v1.json"
+		if pData, err := os.ReadFile(pricePath); err == nil {
+			var pw GenericModelWeights
+			if err := json.Unmarshal(pData, &pw); err == nil {
+				s.priceWeights = pw
+				log.Printf("[ML Scorer] Hot-reloaded price sensitivity weights version %s", pw.Version)
+			}
+		}
+	}
+	return nil
+}
+
+// StartAutoReloadListener listens on Redis channel 'analytics:ml:reload' to dynamically reload weights.
+func (s *Scorer) StartAutoReloadListener(ctx context.Context, modelPath string) {
+	if s.rdb == nil {
+		return
+	}
+	go func() {
+		pubsub := s.rdb.Subscribe(ctx, "analytics:ml:reload")
+		defer pubsub.Close()
+		ch := pubsub.Channel()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				log.Printf("[ML Scorer] Reload signal received via Redis (%s). Updating in-memory weights...", msg.Payload)
+				_ = s.ReloadWeights(modelPath)
+			}
+		}
+	}()
+}
+
 // ProcessEvent updates the shopper's real-time feature window in Redis, calculates purchase intent,
 // and returns the full feature snapshot ready for ClickHouse feature store ingestion.
 func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64, bool, *domain.ShopperFeature, error) {
