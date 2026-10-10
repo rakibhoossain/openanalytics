@@ -52,6 +52,7 @@ A complete, production-grade guide for deploying **OpenAnalytics** — the real-
 > **Zero Named Docker Volumes**: All persistent data is strictly isolated inside the repository's `./data/` folder for transparent backups, migration, and monitoring.
 
 - `./data/clickhouse` $\rightarrow$ ClickHouse database files, columnar partitions, and metadata (`/var/lib/clickhouse`).
+- `./data/postgres` $\rightarrow$ PostgreSQL 18 database files and WAL logs (`/var/lib/postgresql`).
 - `./data/redis` $\rightarrow$ Redis RDB snapshots and AOF persistence files (`/data`).
 - `./data/geo` $\rightarrow$ MaxMind GeoLite2 databases auto-updated by `geoipupdate` (`/usr/share/GeoIP`).
 - `./data/models` $\rightarrow$ Trained ML models (JSON weights & ONNX binaries) used by `ml-worker` and updated by `ml-retrain` (`/app/data/models`).
@@ -126,6 +127,7 @@ Prepare the `./data` directories located directly in the project directory:
 ```bash
 # From within /path/to/openanalytics:
 mkdir -p data/clickhouse \
+         data/postgres \
          data/redis \
          data/geo \
          data/models \

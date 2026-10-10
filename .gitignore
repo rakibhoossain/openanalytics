@@ -36,3 +36,4 @@ server.log
 /ml/training/__pycache__
 /ui/assets
 /ml/__pycache__
+.production.env

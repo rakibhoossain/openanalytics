@@ -45,7 +45,28 @@ services:
       retries: 5
 
   # ==============================================================================
-  # 3. GeoIP Database Updater
+  # 3. Relational Storage & Meta CAPI: PostgreSQL 18
+  # ==============================================================================
+  postgres:
+    image: postgres:18-alpine
+    container_name: op_postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-analytics_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-analytics_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ==============================================================================
+  # 4. GeoIP Database Updater
   # ==============================================================================
   geoipupdate:
     image: ghcr.io/maxmind/geoipupdate:v7
@@ -130,18 +151,22 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       ENV: production
       LOG_LEVEL: info
       CLICKHOUSE_ADDR: clickhouse:9000
-      CLICKHOUSE_DATABASE: openpanel
-      CLICKHOUSE_USERNAME: openpanel
-      CLICKHOUSE_PASSWORD: openpanel
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-openpanel}
+      CLICKHOUSE_USERNAME: ${CLICKHOUSE_USERNAME:-openpanel}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-openpanel}
       REDIS_ADDR: redis:6379
+      POSTGRES_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-analytics_db}?sslmode=disable
+      POSTGRES_MAX_CONNS: ${POSTGRES_MAX_CONNS:-25}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-}
-      KAFKA_EVENTS_TOPIC: analytics.events.raw
-      KAFKA_CONSUMER_GROUP: openanalytics-worker-group
-      KAFKA_BATCH_SIZE: 5000
+      KAFKA_EVENTS_TOPIC: ${KAFKA_EVENTS_TOPIC:-analytics.events.raw}
+      KAFKA_CONSUMER_GROUP: ${KAFKA_CONSUMER_GROUP:-openanalytics-worker-group}
+      KAFKA_BATCH_SIZE: ${KAFKA_BATCH_SIZE:-5000}
 
   # ==============================================================================
   # 7. Behavioral ML Worker (cmd/ml-worker - Scalable: --scale ml-worker=2)
