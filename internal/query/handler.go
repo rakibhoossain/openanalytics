@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -414,6 +415,23 @@ func (h *Handler) HandleShopperJourney(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_FAILED", err.Error())
 		return
+	}
+
+	targetCurrency := h.extractCurrency(r)
+	if h.currencyService != nil && targetCurrency != "USD" {
+		for i := range journey.Events {
+			if journey.Events[i].Revenue != nil && *journey.Events[i].Revenue > 0 {
+				converted := h.currencyService.ConvertFromUSD(*journey.Events[i].Revenue, targetCurrency)
+				journey.Events[i].Revenue = &converted
+			}
+			journey.Events[i].Currency = targetCurrency
+		}
+	} else {
+		for i := range journey.Events {
+			if journey.Events[i].Currency == "" {
+				journey.Events[i].Currency = targetCurrency
+			}
+		}
 	}
 
 	httputil.JSON(w, http.StatusOK, journey)
@@ -918,6 +936,24 @@ func (h *Handler) HandleListEvents(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusInternalServerError, "QUERY_ERROR", err.Error())
 		return
 	}
+
+	targetCurrency := h.extractCurrency(r)
+	if h.currencyService != nil && targetCurrency != "USD" {
+		for i := range events {
+			if events[i].Revenue != nil && *events[i].Revenue > 0 {
+				converted := h.currencyService.ConvertFromUSD(*events[i].Revenue, targetCurrency)
+				events[i].Revenue = &converted
+			}
+			events[i].Currency = targetCurrency
+		}
+	} else {
+		for i := range events {
+			if events[i].Currency == "" {
+				events[i].Currency = targetCurrency
+			}
+		}
+	}
+
 	httputil.JSON(w, http.StatusOK, map[string]any{
 		"events": events,
 		"total":  total,
@@ -964,6 +1000,9 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	filterType := h.getParam(r, "type")
+	if filterType == "" {
+		filterType = h.getParam(r, "filter")
+	}
 	search := strings.TrimSpace(h.getParam(r, "search"))
 	limit := 50
 	offset := 0
@@ -976,6 +1015,10 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
 			offset = o
 		}
+	} else if pStr := h.getParam(r, "page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 1 {
+			offset = (p - 1) * limit
+		}
 	}
 
 	var whereExtra []string
@@ -983,14 +1026,14 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 	args = append(args, tenantID, shopID)
 
 	if filterType == "identified" {
-		whereExtra = append(whereExtra, "AND customer_id IS NOT NULL AND toString(customer_id) != '00000000-0000-0000-0000-000000000000'")
+		whereExtra = append(whereExtra, "AND events.customer_id IS NOT NULL AND toString(events.customer_id) != '00000000-0000-0000-0000-000000000000'")
 	} else if filterType == "anonymous" {
-		whereExtra = append(whereExtra, "AND (customer_id IS NULL OR toString(customer_id) = '00000000-0000-0000-0000-000000000000')")
+		whereExtra = append(whereExtra, "AND (events.customer_id IS NULL OR toString(events.customer_id) = '00000000-0000-0000-0000-000000000000')")
 	}
 
 	if search != "" {
 		pattern := "%" + search + "%"
-		whereExtra = append(whereExtra, "AND (device_id ILIKE ? OR toString(customer_id) ILIKE ? OR country ILIKE ? OR city ILIKE ? OR browser ILIKE ? OR os ILIKE ? OR device ILIKE ?)")
+		whereExtra = append(whereExtra, "AND (events.device_id ILIKE ? OR toString(events.customer_id) ILIKE ? OR toString(events.country) ILIKE ? OR events.city ILIKE ? OR events.browser ILIKE ? OR events.os ILIKE ? OR events.device ILIKE ?)")
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 
@@ -1002,37 +1045,41 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 	whereStr := strings.Join(whereExtra, " ")
 	query := fmt.Sprintf(`
 		SELECT
-			device_id,
-			toString(any(customer_id)) as customer_id,
+			events.device_id,
+			toString(any(events.customer_id)) as cust_id,
 			count(*) as events_count,
-			uniqExact(session_id) as sessions_count,
-			coalesce(sum(revenue_usd), 0) as total_revenue,
-			min(created_at) as first_seen,
-			max(created_at) as last_seen,
-			any(country) as country,
-			any(city) as city,
-			any(browser) as browser,
-			any(os) as os,
-			any(device) as device
-		FROM %s.events
-		WHERE tenant_id = ? AND shop_id = ? %s
-		GROUP BY device_id
+			uniqExact(events.session_id) as sessions_count,
+			coalesce(sum(events.revenue_usd), 0) as total_revenue,
+			min(events.created_at) as first_seen,
+			max(events.created_at) as last_seen,
+			any(events.country) as country_code,
+			any(events.city) as city_name,
+			any(events.browser) as browser_name,
+			any(events.os) as os_name,
+			any(events.device) as device_type
+		FROM %s.events AS events
+		WHERE events.tenant_id = ? AND events.shop_id = ? %s
+		GROUP BY events.device_id
 		%s
 		LIMIT ? OFFSET ?
 	`, h.queryService.database, whereStr, orderClause)
 
 	args = append(args, limit, offset)
 
+	targetCurrency := h.extractCurrency(r)
 	var items []map[string]any
-	if rows, err := h.queryService.Conn().Query(r.Context(), query, args...); err == nil {
+	if rows, err := h.queryService.Conn().Query(r.Context(), query, args...); err != nil {
+		log.Printf("[HandleListProfiles] Query error: %v", err)
+	} else {
 		defer rows.Close()
 		for rows.Next() {
 			var devID, custID, country, city, browser, os, device string
 			var evCount, sessCount uint64
 			var revCents int64
 			var firstSeen, lastSeen time.Time
-			if err := rows.Scan(&devID, &custID, &evCount, &sessCount, &revCents, &firstSeen, &lastSeen, &country, &city, &browser, &os, &device); err == nil {
-				targetCurrency := h.extractCurrency(r)
+			if err := rows.Scan(&devID, &custID, &evCount, &sessCount, &revCents, &firstSeen, &lastSeen, &country, &city, &browser, &os, &device); err != nil {
+				log.Printf("[HandleListProfiles] Scan error: %v", err)
+			} else {
 				if h.currencyService != nil && targetCurrency != "USD" {
 					revCents = h.currencyService.ConvertFromUSD(revCents, targetCurrency)
 				}
@@ -1044,7 +1091,8 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 					"is_identified":  isIdentified,
 					"events_count":   evCount,
 					"sessions_count": sessCount,
-					"total_revenue":  float64(revCents) / 100.0,
+					"total_revenue":  revCents,
+					"currency":       targetCurrency,
 					"first_seen":     firstSeen.UTC().Format(time.RFC3339),
 					"last_seen":      lastSeen.UTC().Format(time.RFC3339),
 					"country":        country,
@@ -1063,6 +1111,7 @@ func (h *Handler) HandleListProfiles(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, map[string]any{
 		"profiles": items,
 		"total":    len(items),
+		"currency": targetCurrency,
 	})
 }
 
@@ -1111,6 +1160,7 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 	var firstSeen, lastSeen time.Time
 	var country, city, browser, osName, device string
 
+	targetCurrency := h.extractCurrency(r)
 	row := h.queryService.Conn().QueryRow(r.Context(), query, tenantID, shopID, profileID, profileID)
 	err = row.Scan(&devID, &custID, &evCount, &sessCount, &totRev, &firstSeen, &lastSeen, &country, &city, &browser, &osName, &device)
 	if err != nil {
@@ -1121,6 +1171,7 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 			"events_count":   0,
 			"sessions_count": 0,
 			"total_revenue":  0,
+			"currency":       targetCurrency,
 			"first_seen":     now.Format("2006-01-02T15:04:05.000Z"),
 			"last_seen":      now.Format("2006-01-02T15:04:05.000Z"),
 			"country":        "",
@@ -1132,8 +1183,6 @@ func (h *Handler) HandleGetProfile(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	targetCurrency := h.extractCurrency(r)
 	if h.currencyService != nil && targetCurrency != "USD" {
 		totRev = h.currencyService.ConvertFromUSD(totRev, targetCurrency)
 	}
@@ -2667,11 +2716,19 @@ func (h *Handler) HandleTRPCEvents(w http.ResponseWriter, r *http.Request) {
 		events = events[:50]
 	}
 
+	targetCurrency := h.extractCurrency(r)
 	items := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		rev := int64(0)
 		if ev.Revenue != nil {
 			rev = *ev.Revenue
+		}
+		if rev > 0 && h.currencyService != nil && targetCurrency != "USD" {
+			rev = h.currencyService.ConvertFromUSD(rev, targetCurrency)
+		}
+		curr := targetCurrency
+		if curr == "" {
+			curr = "USD"
 		}
 		path := ev.Path
 		if path == "" {
@@ -2697,7 +2754,7 @@ func (h *Handler) HandleTRPCEvents(w http.ResponseWriter, r *http.Request) {
 			"browser":      ev.Browser,
 			"device":       ev.Device,
 			"revenue":      rev,
-			"currency":     ev.Currency,
+			"currency":     curr,
 			"createdAt":    ev.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"properties":   ev.Properties,
 		})
@@ -2813,11 +2870,19 @@ func (h *Handler) HandleTRPCConversions(w http.ResponseWriter, r *http.Request) 
 		events = events[:50]
 	}
 
+	targetCurrency := h.extractCurrency(r)
 	items := make([]map[string]any, 0, len(events))
 	for _, ev := range events {
 		rev := int64(0)
 		if ev.Revenue != nil {
 			rev = *ev.Revenue
+		}
+		if rev > 0 && h.currencyService != nil && targetCurrency != "USD" {
+			rev = h.currencyService.ConvertFromUSD(rev, targetCurrency)
+		}
+		curr := targetCurrency
+		if curr == "" {
+			curr = "USD"
 		}
 		path := ev.Path
 		if path == "" {
@@ -2843,7 +2908,7 @@ func (h *Handler) HandleTRPCConversions(w http.ResponseWriter, r *http.Request) 
 			"browser":      ev.Browser,
 			"device":       ev.Device,
 			"revenue":      rev,
-			"currency":     ev.Currency,
+			"currency":     curr,
 			"createdAt":    ev.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 			"properties":   ev.Properties,
 		})
@@ -2901,6 +2966,15 @@ func (h *Handler) HandleTRPCEventDetails(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	targetCurrency := h.extractCurrency(r)
+	if revCents > 0 && h.currencyService != nil && targetCurrency != "USD" {
+		revCents = h.currencyService.ConvertFromUSD(revCents, targetCurrency)
+	}
+	curr := targetCurrency
+	if curr == "" {
+		curr = "USD"
+	}
+
 	profID := ev.DeviceID
 	if ev.CustomerID != nil && *ev.CustomerID != uuid.Nil {
 		profID = ev.CustomerID.String()
@@ -2923,7 +2997,7 @@ func (h *Handler) HandleTRPCEventDetails(w http.ResponseWriter, r *http.Request)
 		"browser":      ev.Browser,
 		"device":       ev.Device,
 		"revenue":      revCents,
-		"currency":     ev.Currency,
+		"currency":     curr,
 		"createdAt":    ev.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"properties":   ev.Properties,
 	}
@@ -3177,6 +3251,7 @@ func (h *Handler) HandleTRPCChartValues(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) {
 	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	targetCurrency := h.extractCurrency(r)
 	limit := 50
 	offset := 0
 
@@ -3226,6 +3301,10 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 		if ref == "" {
 			ref = "Direct"
 		}
+		revCents := s.TotalRevenueUSD
+		if h.currencyService != nil && targetCurrency != "USD" {
+			revCents = h.currencyService.ConvertFromUSD(revCents, targetCurrency)
+		}
 		items = append(items, map[string]any{
 			"id":              s.ID.String(),
 			"sessionId":       s.ID.String(),
@@ -3242,8 +3321,9 @@ func (h *Handler) HandleTRPCSessionList(w http.ResponseWriter, r *http.Request) 
 			"eventCount":      s.EventsCount,
 			"screenViewCount": s.ScreenViewsCount,
 			"isBounce":        s.EventsCount <= 1,
-			"revenue":         float64(s.TotalRevenueUSD) / 100.0,
-			"revenueCents":    s.TotalRevenueUSD,
+			"revenue":         float64(revCents) / 100.0,
+			"revenueCents":    revCents,
+			"currency":        targetCurrency,
 			"country":         s.Country,
 			"city":            s.City,
 			"os":              s.OS,

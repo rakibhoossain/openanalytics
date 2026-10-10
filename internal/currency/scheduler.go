@@ -50,6 +50,10 @@ func NewScheduler(appID string, pool *pgxpool.Pool, rdb *redis.Client, service *
 
 // Start launches the scheduler in a background goroutine.
 func (s *Scheduler) Start(ctx context.Context) {
+	if s.appID == "" {
+		log.Println("[CurrencyScheduler] OpenExchangeRates app_id not set; automatic sync disabled (using stored rates from PostgreSQL/Redis)")
+		return
+	}
 	go func() {
 		log.Printf("[CurrencyScheduler] Starting currency sync scheduler (interval: %v)", s.interval)
 		// Run initial synchronization immediately on boot
