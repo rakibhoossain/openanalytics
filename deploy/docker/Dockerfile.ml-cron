@@ -8,14 +8,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install ML requirements
+# Install ML requirements using pre-compiled binary wheels (avoids slow source compilation)
 COPY ml/requirements.txt /app/ml/requirements.txt
-RUN pip install --no-cache-dir -r /app/ml/requirements.txt \
+RUN pip install --no-cache-dir --prefer-binary \
+    -r /app/ml/requirements.txt \
     redis clickhouse-connect
 
 # Copy source code

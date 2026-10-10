@@ -102,19 +102,46 @@ docker compose version    # Docker Compose version v2.20+
 
 ---
 
-## 2. Clone Repository & Setup Structure
+## 2. Server Deployment: Zero-Git-Clone (Recommended) vs Full Clone
 
-Clone the repository or pull the latest commits:
+Because production images are pre-compiled and hosted on Docker Hub, **you do NOT need to clone the entire 3GB source code repository on the production server**. This prevents high disk usage and completely avoids Out-Of-Memory (OOM) compiler crashes on 2-core / 4GB RAM servers.
+
+### Method A: Lean Zero-Git-Clone Deployment (Recommended for Servers)
+
+On your server (`91.99.83.171`), simply create a project folder with `docker-compose.yml` and `.env`:
 
 ```bash
-# Clone to desired destination (e.g., /opt/openanalytics or ~/Projects/openanalytics)
+# 1. Create deployment directory
+mkdir -p /opt/openanalytics && cd /opt/openanalytics
+
+# 2. Download docker-compose.yml and .production.env
+curl -fsSL https://raw.githubusercontent.com/rakibhoossain/analytics/main/openanalytics/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/rakibhoossain/analytics/main/openanalytics/.production.env -o .env
+
+# 3. Create persistent host directories
+mkdir -p data/clickhouse \
+         data/postgres \
+         data/redis \
+         data/geo \
+         data/models \
+         deploy/clickhouse/init
+
+# 4. Pull pre-built multi-arch images directly from Docker Hub (15 seconds, 0% CPU, 0 RAM)
+docker compose pull
+
+# 5. Launch all services
+docker compose up -d
+```
+
+### Method B: Full Git Clone (For Development / Staging)
+
+```bash
 cd /opt
-sudo git clone https://github.com/your-org/analytics.git
+sudo git clone https://github.com/rakibhoossain/analytics.git
 sudo chown -R $USER:$USER /opt/analytics
 cd /opt/analytics/openanalytics
 
 # If updating an existing deployment:
-git checkout main
 git pull origin main
 ```
 
@@ -478,21 +505,27 @@ sudo ufw status
 
 ## 8. Continuous Updates & Zero-Downtime Deployment
 
-To deploy newer commits without taking down ClickHouse or Redis:
+### Step 8.1: From Your Local Development Machine (Build & Push)
+When you make changes to Go or Python code, build and push multi-arch images (`linux/amd64` and `linux/arm64`) to Docker Hub:
 
 ```bash
-cd /opt/analytics/openanalytics
+# From openanalytics root on your local machine:
+./scripts/build_and_push.sh
+```
 
-# 1. Pull latest code
-git pull origin main
+### Step 8.2: On the Production Server (Zero-Compilation Update)
+Because the server does not need to compile anything, simply pull and restart the microservices:
 
-# 2. Build the updated images
-docker compose build ingest query worker ml-worker
+```bash
+cd /opt/openanalytics
 
-# 3. Rolling recreate without touching databases
-docker compose up -d --no-deps ingest query worker ml-worker
+# 1. Pull the updated pre-built images from Docker Hub (< 15 seconds)
+docker compose pull ingest query worker ml-worker ml-retrain
 
-# 4. Remove dangling unused Docker images
+# 2. Recreate containers with zero downtime (databases stay running without interruption)
+docker compose up -d --no-deps ingest query worker ml-worker ml-retrain
+
+# 3. Clean up older unused image layers
 docker image prune -f
 ```
 
