@@ -171,7 +171,6 @@ services:
   # 8. Automated ML Retraining Cron (Periodically retrains models on ClickHouse)
   # ==============================================================================
   ml-retrain:
-    profiles: ["ml-cron"]
     build:
       context: ..
       dockerfile: deploy/docker/Dockerfile.ml-cron

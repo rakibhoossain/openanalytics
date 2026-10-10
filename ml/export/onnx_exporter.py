@@ -26,7 +26,9 @@ def export_model_to_onnx(model_wrapper: Any, output_path: Path, num_features: in
             estimator = LogisticRegression()
             import numpy as np
             X = np.eye(num_features, dtype=np.float32)
-            y = np.array([0, 1] * (num_features // 2), dtype=np.int32)[:num_features]
+            y = np.array([0, 1] * ((num_features + 1) // 2), dtype=np.int32)[:num_features]
+            if len(np.unique(y)) < 2 and num_features > 1:
+                y[1] = 1
             estimator.fit(X, y)
 
         initial_type = [("float_input", FloatTensorType([None, num_features]))]

@@ -8,11 +8,11 @@
     "dwell_time_seconds"
   ],
   "coefficients": {
-    "bias": -3.3022,
-    "views_count": 0.04571,
-    "cart_adds_count": 0.68644,
-    "distinct_products": -0.01067,
-    "dwell_time_seconds": 0.00122
+    "bias": -2.134601354598999,
+    "views_count": 0.04616,
+    "cart_adds_count": 1.0222,
+    "distinct_products": -0.04664,
+    "dwell_time_seconds": 0.0022
   },
   "thresholds": {
     "low_intent": 0.3,
@@ -20,8 +20,8 @@
     "high_intent": 0.85
   },
   "metadata": {
-    "accuracy_auc": 0.892,
-    "f1_score": 0.841,
+    "accuracy_auc": 0.847,
+    "f1_score": 0.5156,
     "latency_target_microseconds": 50
   }
 }

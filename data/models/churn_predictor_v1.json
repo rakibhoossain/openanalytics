@@ -9,12 +9,13 @@
     "avg_scroll_depth"
   ],
   "coefficients": {
-    "bias": 1.15,
-    "views_count": -0.08,
-    "cart_adds_count": -2.1,
-    "distinct_products": 0.05,
+    "bias": 7.4251227378845215,
+    "views_count": -0.08149,
+    "cart_adds_count": -11.2095,
+    "distinct_products": 0.05717,
     "dwell_time_seconds": -0.005,
-    "avg_scroll_depth": -1.85
+    "avg_scroll_depth": 0.14896,
+    "total_dwell_seconds": -0.00513
   },
   "thresholds": {
     "low_risk": 0.3,
@@ -22,8 +23,8 @@
     "high_risk": 0.8
   },
   "metadata": {
-    "accuracy_auc": 0.875,
-    "f1_score": 0.812,
+    "accuracy_auc": 1.0,
+    "f1_score": 1.0,
     "latency_target_microseconds": 50
   }
 }

@@ -18,9 +18,8 @@ COPY ml/requirements.txt /app/ml/requirements.txt
 RUN pip install --no-cache-dir -r /app/ml/requirements.txt \
     redis clickhouse-connect
 
-# Copy source code and default data
+# Copy source code
 COPY ml /app/ml
-COPY data /app/data
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app/ml
