@@ -1936,9 +1936,7 @@ func (h *Handler) HandleTRPCProfileMetrics(w http.ResponseWriter, r *http.Reques
 		"uniqueDaysActive":       0,
 		"conversionEvents":       0,
 		"avgTimeBetweenSessions": 0.0,
-		"revenue":                int64(0),
-		"revenueCents":           int64(0),
-		"revenueDollars":         0.0,
+		"revenue":                0.0,
 		"currency":               targetCurrency,
 	}
 
@@ -1976,9 +1974,8 @@ func (h *Handler) HandleTRPCProfileMetrics(w http.ResponseWriter, r *http.Reques
 			metrics["conversionEvents"] = convEv
 			metrics["firstSeen"] = firstSeen.UTC().Format("2006-01-02T15:04:05.000Z")
 			metrics["lastSeen"] = lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
-			metrics["revenue"] = revCents
-			metrics["revenueCents"] = revCents
-			metrics["revenueDollars"] = float64(revCents) / 100.0
+			metrics["uniqueDaysActive"] = uniqueDays
+			metrics["revenue"] = float64(revCents) / 100.0
 			metrics["currency"] = targetCurrency
 		}
 
