@@ -153,10 +153,48 @@ func main() {
 	ingestRouter.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID", "X-Currency"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID", "X-Currency", "X-AUTH-KEY"},
 		AllowCredentials: false,
 		MaxAge:           86400 * 7,
 	}))
+
+	// Security: enforce X-AUTH-KEY if configured
+	if cfg.AuthKey != "" {
+		log.Printf("[Security] X-AUTH-KEY enforcement enabled on ingest service (:%s)", cfg.IngestPort)
+		ingestRouter.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Preflight OPTIONS and health checks bypass auth-key
+				if r.Method == http.MethodOptions || r.URL.Path == "/health" || r.URL.Path == "/healthz" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
+				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
+					r.URL.Path == "/api/v1/batch" ||
+					r.URL.Path == "/api/v1/replay" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Built-in dashboard UI requests bypass auth-key
+				if strings.Contains(r.Header.Get("Referer"), "/ui") {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				authKey := r.Header.Get("X-AUTH-KEY")
+				if authKey == "" {
+					authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
+				if authKey != cfg.AuthKey {
+					httputil.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or missing X-AUTH-KEY")
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
 
 	ingestRouter.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		httputil.JSON(w, http.StatusOK, map[string]string{
@@ -299,8 +337,8 @@ func main() {
 		log.Printf("[Security] X-AUTH-KEY enforcement enabled on query engine (:8081)")
 		queryRouter.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Preflight OPTIONS, health checks, static UI assets, WebSocket upgrades, and public favicon proxies bypass auth-key
-				if r.Method == http.MethodOptions || r.URL.Path == "/health" || r.URL.Path == "/healthz" ||
+				// Preflight OPTIONS, root redirect, health checks, static UI assets, WebSocket upgrades, and public favicon proxies bypass auth-key
+				if r.Method == http.MethodOptions || r.URL.Path == "/" || r.URL.Path == "/health" || r.URL.Path == "/healthz" ||
 					strings.HasPrefix(r.URL.Path, "/ui") || strings.HasPrefix(r.URL.Path, "/live") ||
 					strings.HasPrefix(r.URL.Path, "/misc") || strings.HasPrefix(r.URL.Path, "/api/v1/misc") ||
 					r.URL.Path == "/favicon.ico" {
@@ -324,6 +362,9 @@ func main() {
 				}
 
 				authKey := r.Header.Get("X-AUTH-KEY")
+				if authKey == "" {
+					authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
 				if authKey != cfg.AuthKey {
 					httputil.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or missing X-AUTH-KEY")
 					return

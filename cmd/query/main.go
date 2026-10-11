@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -113,11 +114,53 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"}, // CRITICAL(cors-policy): In production, restrict to merchant domains and dashboard UI origin
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Tenant-ID", "X-Shop-ID", "X-Currency"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Tenant-ID", "X-Shop-ID", "X-Currency", "X-AUTH-KEY"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
+
+	// Security: enforce X-AUTH-KEY if configured
+	if cfg.AuthKey != "" {
+		log.Printf("[Security] X-AUTH-KEY enforcement enabled on query engine (:8081)")
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Preflight OPTIONS, health checks, static UI assets, WebSocket upgrades, and public favicon proxies bypass auth-key
+				if r.Method == http.MethodOptions || r.URL.Path == "/" || r.URL.Path == "/health" || r.URL.Path == "/healthz" ||
+					strings.HasPrefix(r.URL.Path, "/ui") || strings.HasPrefix(r.URL.Path, "/live") ||
+					strings.HasPrefix(r.URL.Path, "/misc") || strings.HasPrefix(r.URL.Path, "/api/v1/misc") ||
+					r.URL.Path == "/favicon.ico" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
+				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
+					r.URL.Path == "/api/v1/batch" ||
+					r.URL.Path == "/api/v1/replay" ||
+					r.URL.Path == "/api/v1/lookup" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Built-in dashboard UI requests (directly navigating /ui) bypass auth-key
+				if strings.Contains(r.Header.Get("Referer"), "/ui") {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				authKey := r.Header.Get("X-AUTH-KEY")
+				if authKey == "" {
+					authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
+				if authKey != cfg.AuthKey {
+					httputil.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or missing X-AUTH-KEY")
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
 
 	// 5. Register HTTP Handlers & WebSocket routes
 	handler := query.NewHandler(qs)

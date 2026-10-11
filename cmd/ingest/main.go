@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -108,11 +109,56 @@ func main() {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Shop-ID", "X-Tenant-ID", "X-Currency", "X-AUTH-KEY"},
 		AllowCredentials: false,
 		MaxAge:           86400 * 7,
 	}))
 
+	// Security: enforce X-AUTH-KEY if configured
+	if cfg.AuthKey != "" {
+		log.Printf("[Security] X-AUTH-KEY enforcement enabled on ingest service (:%s)", cfg.IngestPort)
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Preflight OPTIONS and health checks bypass auth-key
+				if r.Method == http.MethodOptions || r.URL.Path == "/health" || r.URL.Path == "/healthz" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
+				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
+					r.URL.Path == "/api/v1/batch" ||
+					r.URL.Path == "/api/v1/replay" {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				// Built-in dashboard UI requests bypass auth-key
+				if strings.Contains(r.Header.Get("Referer"), "/ui") {
+					next.ServeHTTP(w, r)
+					return
+				}
+
+				authKey := r.Header.Get("X-AUTH-KEY")
+				if authKey == "" {
+					authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				}
+				if authKey != cfg.AuthKey {
+					httputil.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Invalid or missing X-AUTH-KEY")
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
+
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		httputil.JSON(w, http.StatusOK, map[string]string{
+			"status":  "healthy",
+			"service": "openanalytics-ingest",
+			"time":    time.Now().UTC().Format(time.RFC3339),
+		})
+	})
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		httputil.JSON(w, http.StatusOK, map[string]string{
 			"status":  "healthy",
@@ -125,6 +171,7 @@ func main() {
 		r.Post("/track", ingestHandler.HandleTrack)
 		r.Post("/replay", ingestHandler.HandleReplay)
 		r.Post("/batch", ingestHandler.HandleBatch)
+		r.Post("/track/batch", ingestHandler.HandleBatch)
 		r.Get("/track/device-id", ingestHandler.HandleDeviceID)
 		r.Post("/lookup", ingestHandler.HandleLookup)
 	})
