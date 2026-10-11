@@ -348,13 +348,11 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.JSON(w, http.StatusAccepted, TrackResponse{
-		EventID:      event.ID.String(),
-		AltEventID:   event.ID.String(),
-		DeviceID:     deviceID,
-		AltDeviceID:  deviceID,
-		SessionID:    event.SessionID.String(),
-		AltSessionID: event.SessionID.String(),
-		Status:       "accepted",
+		EventID:    event.ID.String(),
+		AltEventID: event.ID.String(),
+		DeviceID:   deviceID,
+		SessionID:  event.SessionID.String(),
+		Status:     "accepted",
 	})
 }
 
@@ -807,9 +805,6 @@ func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []by
 		return
 	}
 
-	if payload.SessionID == "" && payload.AltSessionID != "" {
-		payload.SessionID = payload.AltSessionID
-	}
 	if payload.ShopID == "" && payload.AltShopID != "" {
 		payload.ShopID = payload.AltShopID
 	}

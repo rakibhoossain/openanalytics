@@ -84,8 +84,8 @@ type UserData struct {
 	ZipCode         string `json:"zip_code,omitempty"`
 	CountryCode     string `json:"country_code,omitempty"`
 	ExternalID      string `json:"external_id,omitempty"`
-	Fbp             string `json:"fbp,omitempty"`             // _fbp browser cookie
-	Fbc             string `json:"fbc,omitempty"`             // _fbc click ID cookie
+	Fbp             string `json:"fbp,omitempty"` // _fbp browser cookie
+	Fbc             string `json:"fbc,omitempty"` // _fbc click ID cookie
 	ClientIPAddress string `json:"client_ip_address,omitempty"`
 	ClientUserAgent string `json:"client_user_agent,omitempty"`
 }
@@ -94,8 +94,8 @@ type UserData struct {
 type ECommerceItem struct {
 	ItemID        string   `json:"item_id"`
 	ItemName      string   `json:"item_name,omitempty"`
-	Price         *float64 `json:"price,omitempty"`          // Unit price in decimal currency (e.g. 29.99)
-	PriceCents    *int64   `json:"price_cents,omitempty"`    // Unit price in integer cents (e.g. 2999)
+	Price         *float64 `json:"price,omitempty"`       // Unit price in decimal currency (e.g. 29.99)
+	PriceCents    *int64   `json:"price_cents,omitempty"` // Unit price in integer cents (e.g. 2999)
 	Quantity      *int64   `json:"quantity,omitempty"`
 	Category      string   `json:"category,omitempty"`
 	ItemCategory  string   `json:"item_category,omitempty"`
@@ -149,13 +149,13 @@ type TrackRequest struct {
 	ShopID     string `json:"shop_id,omitempty"`
 	ClientID   string `json:"client_id,omitempty"`
 	Name       string `json:"name"`
-	Event      string `json:"event,omitempty"`       // GA4/GTM standard event name alias (e.g. "purchase", "add_to_cart")
-	EventID    string `json:"event_id,omitempty"`    // Meta CAPI deduplication ID
+	Event      string `json:"event,omitempty"`    // GA4/GTM standard event name alias (e.g. "purchase", "add_to_cart")
+	EventID    string `json:"event_id,omitempty"` // Meta CAPI deduplication ID
 	AltEventID string `json:"eventId,omitempty"`
 	DeviceID   string `json:"device_id,omitempty"`
 	SessionID  string `json:"session_id,omitempty"`
 	CustomerID string `json:"customer_id,omitempty"`
-	ProfileID  string `json:"profileId,omitempty"`   // OpenPanel profileId support
+	ProfileID  string `json:"profileId,omitempty"` // OpenPanel profileId support
 	AltProfID  string `json:"profile_id,omitempty"`
 	FirstName  string `json:"firstName,omitempty"`
 	LastName   string `json:"lastName,omitempty"`
@@ -163,7 +163,7 @@ type TrackRequest struct {
 
 	// E-Commerce telemetry (Revenue in integer cents, e.g. 100 = $1.00, 178 = $1.78, 14999 = $149.99)
 	Revenue       *FlexibleInt64         `json:"revenue,omitempty"`
-	Value         *float64               `json:"value,omitempty"`         // GA4 standard decimal value (e.g. 29.99)
+	Value         *float64               `json:"value,omitempty"` // GA4 standard decimal value (e.g. 29.99)
 	Currency      string                 `json:"currency,omitempty"`
 	ProductID     string                 `json:"product_id,omitempty"`
 	CartID        string                 `json:"cart_id,omitempty"`
@@ -191,13 +191,11 @@ type BatchTrackRequest struct {
 
 // TrackResponse is returned on successful event ingestion.
 type TrackResponse struct {
-	EventID      string `json:"event_id"`
-	AltEventID   string `json:"eventId,omitempty"`
-	DeviceID     string `json:"device_id"`
-	AltDeviceID  string `json:"deviceId,omitempty"`
-	SessionID    string `json:"session_id,omitempty"`
-	AltSessionID string `json:"sessionId,omitempty"`
-	Status       string `json:"status"`
+	EventID    string `json:"event_id"`
+	AltEventID string `json:"eventId,omitempty"`
+	DeviceID   string `json:"device_id"`
+	SessionID  string `json:"session_id,omitempty"`
+	Status     string `json:"status"`
 }
 
 // DeviceIDResponse is returned by GET /track/device-id.
@@ -209,18 +207,17 @@ type DeviceIDResponse struct {
 
 // ReplayChunkPayload represents an incoming rrweb session recording chunk.
 type ReplayChunkPayload struct {
-	TenantID       string `json:"tenant_id,omitempty"`
-	AltTenantID    string `json:"tenantId,omitempty"`
-	ShopID         string `json:"shop_id,omitempty"`
-	AltShopID      string `json:"shopId,omitempty"`
-	SessionID      string `json:"session_id,omitempty"`
-	AltSessionID   string `json:"sessionId,omitempty"`
-	ChunkIndex     uint16 `json:"chunk_index"`
-	AltChunkIndex  uint16 `json:"chunkIndex"`
-	EventsCount    uint16 `json:"events_count"`
-	AltEventsCount uint16 `json:"eventsCount"`
-	IsFullSnapshot bool   `json:"is_full_snapshot"`
-	AltSnapshot    bool   `json:"isFullSnapshot"`
+	TenantID       string             `json:"tenant_id,omitempty"`
+	AltTenantID    string             `json:"tenantId,omitempty"`
+	ShopID         string             `json:"shop_id,omitempty"`
+	AltShopID      string             `json:"shopId,omitempty"`
+	SessionID      string             `json:"session_id,omitempty"`
+	ChunkIndex     uint16             `json:"chunk_index"`
+	AltChunkIndex  uint16             `json:"chunkIndex"`
+	EventsCount    uint16             `json:"events_count"`
+	AltEventsCount uint16             `json:"eventsCount"`
+	IsFullSnapshot bool               `json:"is_full_snapshot"`
+	AltSnapshot    bool               `json:"isFullSnapshot"`
 	StartedAt      *FlexibleTimestamp `json:"started_at,omitempty"`
 	AltStartedAt   *FlexibleTimestamp `json:"startedAt,omitempty"`
 	EndedAt        *FlexibleTimestamp `json:"ended_at,omitempty"`
