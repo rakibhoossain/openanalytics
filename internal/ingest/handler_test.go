@@ -11,6 +11,7 @@ import (
 
 	"openanalytics/internal/geo"
 	"openanalytics/internal/kafka"
+	"strings"
 )
 
 func TestHandleTrackValidation(t *testing.T) {
@@ -36,10 +37,12 @@ func TestHandleTrackValidation(t *testing.T) {
 	})
 
 	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
 
 	tests := []struct {
 		name           string
 		payload        map[string]interface{}
+		headerTenantID string
 		expectedStatus int
 	}{
 		{
@@ -49,6 +52,7 @@ func TestHandleTrackValidation(t *testing.T) {
 				"name":    "view_product",
 				"path":    "/products/shoes-sneakers",
 			},
+			headerTenantID: tenantID.String(),
 			expectedStatus: http.StatusAccepted,
 		},
 		{
@@ -56,6 +60,7 @@ func TestHandleTrackValidation(t *testing.T) {
 			payload: map[string]interface{}{
 				"shop_id": shopID.String(),
 			},
+			headerTenantID: tenantID.String(),
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
@@ -64,6 +69,16 @@ func TestHandleTrackValidation(t *testing.T) {
 				"shop_id": "not-a-valid-uuid",
 				"name":    "view_product",
 			},
+			headerTenantID: tenantID.String(),
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name: "Missing tenant ID",
+			payload: map[string]interface{}{
+				"shop_id": shopID.String(),
+				"name":    "view_product",
+			},
+			headerTenantID: "",
 			expectedStatus: http.StatusBadRequest,
 		},
 	}
@@ -75,6 +90,9 @@ func TestHandleTrackValidation(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
 			req.Header.Set("CF-Connecting-IP", "8.8.8.8")
+			if tt.headerTenantID != "" {
+				req.Header.Set("X-Tenant-ID", tt.headerTenantID)
+			}
 
 			w := httptest.NewRecorder()
 			handler.HandleTrack(w, req)
@@ -108,7 +126,9 @@ func TestHandleDeviceID(t *testing.T) {
 	})
 
 	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/track/device-id?shop_id="+shopID.String(), nil)
+	req.Header.Set("X-Tenant-ID", tenantID.String())
 	req.Header.Set("User-Agent", "TestBrowser/1.0")
 	req.RemoteAddr = "192.168.1.100:54321"
 
@@ -134,6 +154,7 @@ func TestHandleDeviceID(t *testing.T) {
 func TestCrawlerBypass(t *testing.T) {
 	handler := NewHandler(Config{Salt: "test_salt"})
 	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
 
 	crawlers := []string{
 		"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -150,6 +171,7 @@ func TestCrawlerBypass(t *testing.T) {
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Tenant-ID", tenantID.String())
 		req.Header.Set("User-Agent", ua)
 
 		w := httptest.NewRecorder()
@@ -173,6 +195,7 @@ func TestCrawlerBypass(t *testing.T) {
 func TestGA4AndMetaCAPIEventIngestion(t *testing.T) {
 	handler := NewHandler(Config{Salt: "test_salt"})
 	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
 
 	t.Run("GA4 Purchase with items, value, and CAPI user_data", func(t *testing.T) {
 		payload := map[string]interface{}{
@@ -204,6 +227,7 @@ func TestGA4AndMetaCAPIEventIngestion(t *testing.T) {
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Tenant-ID", tenantID.String())
 		// Server Action sends from internal edge IP and fetch user-agent:
 		req.Header.Set("X-Forwarded-For", "10.0.0.1")
 		req.Header.Set("User-Agent", "node-fetch/3.0.0")
@@ -249,6 +273,7 @@ func TestGA4AndMetaCAPIEventIngestion(t *testing.T) {
 		body, _ := json.Marshal(payload)
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Tenant-ID", tenantID.String())
 
 		w := httptest.NewRecorder()
 		handler.HandleTrack(w, req)
@@ -258,3 +283,117 @@ func TestGA4AndMetaCAPIEventIngestion(t *testing.T) {
 		}
 	})
 }
+
+func TestTrackTenantEnforcement(t *testing.T) {
+	handler := NewHandler(Config{Salt: "test_salt"})
+	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
+
+	t.Run("Fails when X-Tenant-ID missing", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"shop_id": shopID.String(),
+			"event":   "screen_view",
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Shop-ID", shopID.String())
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400 Bad Request, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("Succeeds when X-Tenant-ID header provided", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"shop_id": shopID.String(),
+			"event":   "screen_view",
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Shop-ID", shopID.String())
+		req.Header.Set("X-Tenant-ID", tenantID.String())
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status 202 Accepted, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("Succeeds when tenant_id in body payload", func(t *testing.T) {
+		payload := map[string]interface{}{
+			"shop_id":   shopID.String(),
+			"tenant_id": tenantID.String(),
+			"event":     "screen_view",
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.HandleTrack(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected status 202 Accepted, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+func TestTrackAuthKeyMiddleware(t *testing.T) {
+	handler := NewHandler(Config{Salt: "test_salt"})
+	expectedAuthKey := "secret_key_123"
+
+	// Setup router with auth middleware matching cmd/ingest/main.go
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/track", func(w http.ResponseWriter, r *http.Request) {
+		authKey := r.Header.Get("X-AUTH-KEY")
+		if authKey == "" {
+			authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		if authKey != expectedAuthKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		handler.HandleTrack(w, r)
+	})
+
+	shopID := uuid.Must(uuid.NewV7())
+	tenantID := uuid.Must(uuid.NewV7())
+	payload := map[string]interface{}{
+		"shop_id":   shopID.String(),
+		"tenant_id": tenantID.String(),
+		"event":     "screen_view",
+	}
+	body, _ := json.Marshal(payload)
+
+	t.Run("Rejects without X-AUTH-KEY", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 Unauthorized, got %d", w.Code)
+		}
+	})
+
+	t.Run("Accepts with valid X-AUTH-KEY", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/track", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-AUTH-KEY", expectedAuthKey)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted, got %d", w.Code)
+		}
+	})
+}
+
+

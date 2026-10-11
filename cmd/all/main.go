@@ -169,14 +169,6 @@ func main() {
 					return
 				}
 
-				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
-				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
-					r.URL.Path == "/api/v1/batch" ||
-					r.URL.Path == "/api/v1/replay" {
-					next.ServeHTTP(w, r)
-					return
-				}
-
 				// Built-in dashboard UI requests bypass auth-key
 				if strings.Contains(r.Header.Get("Referer"), "/ui") {
 					next.ServeHTTP(w, r)
@@ -342,15 +334,6 @@ func main() {
 					strings.HasPrefix(r.URL.Path, "/ui") || strings.HasPrefix(r.URL.Path, "/live") ||
 					strings.HasPrefix(r.URL.Path, "/misc") || strings.HasPrefix(r.URL.Path, "/api/v1/misc") ||
 					r.URL.Path == "/favicon.ico" {
-					next.ServeHTTP(w, r)
-					return
-				}
-
-				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
-				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
-					r.URL.Path == "/api/v1/batch" ||
-					r.URL.Path == "/api/v1/replay" ||
-					r.URL.Path == "/api/v1/lookup" {
 					next.ServeHTTP(w, r)
 					return
 				}

@@ -134,21 +134,6 @@ func main() {
 					return
 				}
 
-				// Public telemetry ingestion endpoints must never be blocked by X-AUTH-KEY
-				if strings.HasPrefix(r.URL.Path, "/api/v1/track") ||
-					r.URL.Path == "/api/v1/batch" ||
-					r.URL.Path == "/api/v1/replay" ||
-					r.URL.Path == "/api/v1/lookup" {
-					next.ServeHTTP(w, r)
-					return
-				}
-
-				// Built-in dashboard UI requests (directly navigating /ui) bypass auth-key
-				if strings.Contains(r.Header.Get("Referer"), "/ui") {
-					next.ServeHTTP(w, r)
-					return
-				}
-
 				authKey := r.Header.Get("X-AUTH-KEY")
 				if authKey == "" {
 					authKey = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")

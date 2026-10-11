@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -173,9 +174,11 @@ func (h *Handler) HandleTrack(w http.ResponseWriter, r *http.Request) {
 		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id is required: "+err.Error())
 		return
 	}
-
-	tenantID := h.resolveTenantID(r, &req)
-
+	tenantID, err := h.resolveTenantID(r, &req)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_TENANT_ID", "Valid tenant_id is required: "+err.Error())
+		return
+	}
 	// Resolve end-shopper Client IP:
 	// Prioritize server-action forwarded IP overrides (UserData.ClientIPAddress or req.IP)
 	// over direct TCP proxy remote address.
@@ -463,7 +466,10 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 		itemFlatProps := FlattenProperties(req.Properties)
 		eventID := normalizeTrackRequest(&req, itemFlatProps)
 
-		tenantID := h.resolveTenantID(r, &req)
+		tenantID, err := h.resolveTenantID(r, &req)
+		if err != nil {
+			continue
+		}
 		deviceID := req.DeviceID
 		if deviceID == "" {
 			deviceID = hash.GenerateDeviceID(h.salt, shopID.String(), eventIP, eventUA)
@@ -595,13 +601,14 @@ func (h *Handler) HandleBatch(w http.ResponseWriter, r *http.Request) {
 
 // HandleDeviceID handles GET /api/v1/track/device-id.
 func (h *Handler) HandleDeviceID(w http.ResponseWriter, r *http.Request) {
-	shopIDStr := r.Header.Get("X-Shop-ID")
-	if shopIDStr == "" {
-		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
+	tenantID, err := h.resolveTenantID(r, nil)
+	if err != nil {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_TENANT_ID", "Valid tenant_id is required: "+err.Error())
 		return
 	}
+	_ = tenantID
 
-	shopID, err := uuid.Parse(shopIDStr)
+	shopID, err := h.resolveShopID(r, nil)
 	if err != nil {
 		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Valid shop_id is required: "+err.Error())
 		return
@@ -628,30 +635,53 @@ func (h *Handler) HandleDeviceID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resolveShopID(r *http.Request, req *TrackRequest) (uuid.UUID, error) {
-	if req.ShopID != "" {
+	if req != nil && req.ShopID != "" {
 		return uuid.Parse(req.ShopID)
 	}
-	if req.ClientID != "" {
+	if req != nil && req.ClientID != "" {
 		return uuid.Parse(req.ClientID)
 	}
 	if hdr := r.Header.Get("X-Shop-ID"); hdr != "" {
 		return uuid.Parse(hdr)
 	}
-	return uuid.Nil, http.ErrNoCookie
+	if q := r.URL.Query().Get("shop_id"); q != "" {
+		return uuid.Parse(q)
+	}
+	return uuid.Nil, errors.New("X-Shop-ID header (or shop_id in body/query) is required")
 }
 
-func (h *Handler) resolveTenantID(r *http.Request, req *TrackRequest) uuid.UUID {
-	if req.TenantID != "" {
-		if id, err := uuid.Parse(req.TenantID); err == nil {
-			return id
+func (h *Handler) resolveTenantID(r *http.Request, req *TrackRequest) (uuid.UUID, error) {
+	if req != nil && req.TenantID != "" {
+		id, err := uuid.Parse(req.TenantID)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid tenant_id UUID: %w", err)
 		}
+		if id == uuid.Nil {
+			return uuid.Nil, errors.New("tenant_id cannot be nil UUID")
+		}
+		return id, nil
 	}
 	if hdr := r.Header.Get("X-Tenant-ID"); hdr != "" {
-		if id, err := uuid.Parse(hdr); err == nil {
-			return id
+		id, err := uuid.Parse(hdr)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid X-Tenant-ID UUID: %w", err)
 		}
+		if id == uuid.Nil {
+			return uuid.Nil, errors.New("X-Tenant-ID cannot be nil UUID")
+		}
+		return id, nil
 	}
-	return uuid.Nil
+	if q := r.URL.Query().Get("tenant_id"); q != "" {
+		id, err := uuid.Parse(q)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid tenant_id query UUID: %w", err)
+		}
+		if id == uuid.Nil {
+			return uuid.Nil, errors.New("tenant_id query cannot be nil UUID")
+		}
+		return id, nil
+	}
+	return uuid.Nil, errors.New("X-Tenant-ID header (or tenant_id in body/query) is required")
 }
 
 func (h *Handler) resolveSessionID(ctx context.Context, shopID uuid.UUID, deviceID string, req *TrackRequest) uuid.UUID {
@@ -831,11 +861,17 @@ func (h *Handler) processReplay(w http.ResponseWriter, r *http.Request, raw []by
 	if tenantIDStr == "" {
 		tenantIDStr = r.Header.Get("X-Tenant-ID")
 	}
-	var tenantID uuid.UUID
-	if tenantIDStr != "" {
-		if tid, err := uuid.Parse(tenantIDStr); err == nil {
-			tenantID = tid
-		}
+	if tenantIDStr == "" {
+		tenantIDStr = r.URL.Query().Get("tenant_id")
+	}
+	if tenantIDStr == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_TENANT_ID", "X-Tenant-ID header (or tenant_id in payload) is required")
+		return
+	}
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil || tenantID == uuid.Nil {
+		httputil.Error(w, http.StatusBadRequest, "INVALID_TENANT_ID", "Valid tenant_id UUID is required")
+		return
 	}
 
 	startedAt := h.resolveTimestamp(payload.StartedAt)
