@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/config"
@@ -20,6 +21,7 @@ import (
 	"openanalytics/internal/geo"
 	"openanalytics/internal/ingest"
 	"openanalytics/internal/kafka"
+	"openanalytics/internal/postgres"
 	"openanalytics/pkg/httputil"
 )
 
@@ -68,9 +70,23 @@ func main() {
 		log.Printf("[Redis] Connected to %s", cfg.RedisAddr)
 	}
 
+	// 3b. Initialize PostgreSQL Pool for L3 cache-miss fallback
+	var pgPool *pgxpool.Pool
+	if cfg.PostgresURL != "" {
+		pool, err := postgres.NewPool(ctx, cfg.PostgresURL, 5)
+		if err != nil {
+			log.Printf("[Postgres] Warning: could not connect to PostgreSQL: %v", err)
+		} else {
+			pgPool = pool
+			defer pgPool.Close()
+			log.Printf("[Postgres] Connected to relational store for cache-miss fallback at %s", cfg.PostgresURL)
+		}
+	}
+
 	// 4. Initialize Currency & Ingest Handler
-	currencyService := currency.NewService(nil, rdb)
+	currencyService := currency.NewService(pgPool, rdb)
 	_ = currencyService.LoadRates(ctx)
+	currencyService.StartBackgroundSync(ctx, time.Duration(cfg.ExchangeRateSyncHours)*time.Hour)
 
 	ingestHandler := ingest.NewHandler(ingest.Config{
 		GeoService:      geoService,

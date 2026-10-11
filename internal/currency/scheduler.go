@@ -84,6 +84,22 @@ func (s *Scheduler) SyncRates(ctx context.Context) error {
 		return fmt.Errorf("openexchangerates app_id is empty")
 	}
 
+	// 0. Atomic Distributed Mutex across horizontally scaled worker replicas
+	if s.rdb != nil {
+		lockDuration := s.interval - 5*time.Minute
+		if lockDuration < 10*time.Minute {
+			lockDuration = 10 * time.Minute
+		}
+		acquired, err := s.rdb.SetNX(ctx, "lock:cron:currency_sync", "1", lockDuration).Result()
+		if err != nil || !acquired {
+			log.Println("[CurrencyScheduler] Another worker replica is syncing or recently synced; loading rates from cache")
+			if s.service != nil {
+				return s.service.LoadRates(ctx)
+			}
+			return nil
+		}
+	}
+
 	url := fmt.Sprintf("https://openexchangerates.org/api/latest.json?app_id=%s", s.appID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

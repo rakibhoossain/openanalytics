@@ -73,7 +73,7 @@ func (s *Service) LoadRates(ctx context.Context) error {
 			if len(dbRates) > 0 {
 				s.SetRates(dbRates)
 				log.Printf("[Currency] Loaded %d exchange rates from PostgreSQL", len(dbRates))
-				// Populate Redis for subsequent hits
+				// Backfill Redis cache for all other services/replicas
 				if s.rdb != nil {
 					if b, err := json.Marshal(dbRates); err == nil {
 						s.rdb.Set(ctx, RedisRatesKey, b, 6*time.Hour)
@@ -86,6 +86,25 @@ func (s *Service) LoadRates(ctx context.Context) error {
 
 	log.Printf("[Currency] Using default baseline exchange rates (%d currencies)", len(s.rates))
 	return nil
+}
+
+// StartBackgroundSync periodically re-syncs rates from Redis or PostgreSQL into memory (default: 6 hours).
+func (s *Service) StartBackgroundSync(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 6 * time.Hour
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = s.LoadRates(ctx)
+			}
+		}
+	}()
 }
 
 // SetRates updates the in-memory rate map safely.
@@ -101,7 +120,7 @@ func (s *Service) SetRates(newRates map[string]float64) {
 }
 
 // GetRate returns the USD-base exchange rate for a currency code (e.g., BDT -> 123.08).
-// Nanosecond in-memory read.
+// Nanosecond in-memory read with PostgreSQL fallback on cache miss.
 func (s *Service) GetRate(currencyCode string) float64 {
 	code := strings.ToUpper(strings.TrimSpace(currencyCode))
 	if code == "" || code == "USD" {
@@ -115,6 +134,19 @@ func (s *Service) GetRate(currencyCode string) float64 {
 	if ok && rate > 0 {
 		return rate
 	}
+
+	// L1 Cache Miss: on-demand query from PostgreSQL L3 if pool is available
+	if s.pool != nil {
+		var dbRate float64
+		err := s.pool.QueryRow(context.Background(), `SELECT rate FROM exchange_rates WHERE currency_code = $1 LIMIT 1`, code).Scan(&dbRate)
+		if err == nil && dbRate > 0 {
+			s.mu.Lock()
+			s.rates[code] = dbRate
+			s.mu.Unlock()
+			return dbRate
+		}
+	}
+
 	return 1.0
 }
 
@@ -157,4 +189,66 @@ func (s *Service) ConvertFromUSD(usdCents int64, targetCurrency string) int64 {
 	}
 
 	return int64(math.Round(float64(usdCents) * rate))
+}
+
+// Convert converts monetary cents from any source currency to any target currency.
+func (s *Service) Convert(cents int64, fromCurrency, toCurrency string) int64 {
+	if cents == 0 {
+		return 0
+	}
+	from := strings.ToUpper(strings.TrimSpace(fromCurrency))
+	to := strings.ToUpper(strings.TrimSpace(toCurrency))
+
+	if from == "" {
+		from = "USD"
+	}
+	if to == "" {
+		to = "USD"
+	}
+	if from == to {
+		return cents
+	}
+
+	if from == "USD" {
+		return s.ConvertFromUSD(cents, to)
+	}
+	if to == "USD" {
+		return s.ConvertToUSD(cents, from)
+	}
+
+	fromRate := s.GetRate(from)
+	toRate := s.GetRate(to)
+	if fromRate <= 0 || toRate <= 0 {
+		return cents
+	}
+
+	usdVal := float64(cents) / fromRate
+	return int64(math.Round(usdVal * toRate))
+}
+
+// ConvertFloat converts a decimal amount from any source currency to any target currency.
+func (s *Service) ConvertFloat(amount float64, fromCurrency, toCurrency string) float64 {
+	if amount == 0 {
+		return 0
+	}
+	from := strings.ToUpper(strings.TrimSpace(fromCurrency))
+	to := strings.ToUpper(strings.TrimSpace(toCurrency))
+
+	if from == "" {
+		from = "USD"
+	}
+	if to == "" {
+		to = "USD"
+	}
+	if from == to {
+		return amount
+	}
+
+	fromRate := s.GetRate(from)
+	toRate := s.GetRate(to)
+	if fromRate <= 0 || toRate <= 0 {
+		return amount
+	}
+
+	return (amount / fromRate) * toRate
 }

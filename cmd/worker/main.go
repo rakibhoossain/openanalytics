@@ -14,6 +14,7 @@ import (
 	"openanalytics/internal/clickhouse"
 	"openanalytics/internal/config"
 	"openanalytics/internal/cron"
+	"openanalytics/internal/currency"
 	"openanalytics/internal/domain"
 	"openanalytics/internal/integrations/meta"
 	"openanalytics/internal/kafka"
@@ -87,12 +88,22 @@ func main() {
 		log.Printf("[Worker %s] Warning: postgres pool init: %v", workerID, err)
 	} else {
 		defer pgPool.Close()
+		_ = postgres.Migrate(ctx, pgPool)
 	}
 
 	metaRepo := meta.NewRepository(pgPool, rdb)
 	metaService := meta.NewService(ctx, metaRepo, nil)
 	defer metaService.Close()
 	log.Printf("[Worker %s] Meta CAPI forwarder service active", workerID)
+
+	// 3d. Initialize Distributed Currency Service & Exchange Rate Scheduler
+	currencyService := currency.NewService(pgPool, rdb)
+	_ = currencyService.LoadRates(ctx)
+	if cfg.OpenExchangeRatesAppID != "" {
+		currencyScheduler := currency.NewScheduler(cfg.OpenExchangeRatesAppID, pgPool, rdb, currencyService, cfg.ExchangeRateSyncHours)
+		currencyScheduler.Start(ctx)
+		log.Printf("[Worker %s] Currency exchange rate scheduler active (sync interval: %dh)", workerID, cfg.ExchangeRateSyncHours)
+	}
 
 	// 4. Initialize Kafka Consumer Group Reader
 	consumer := kafka.NewConsumer(kafka.ConsumerConfig{
