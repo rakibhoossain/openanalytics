@@ -5404,8 +5404,8 @@ func (h *Handler) HandleCreateWSToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 60 seconds TTL for WebSocket handshake
-	token, err := GenerateWSToken(shopID, tenantID, 60*time.Second)
+	// 24 hours TTL for WebSocket connection and reconnects
+	token, err := GenerateWSToken(shopID, tenantID, 24*time.Hour)
 	if err != nil {
 		httputil.Error(w, http.StatusInternalServerError, "TOKEN_GEN_FAILED", "Failed to generate WebSocket token: "+err.Error())
 		return
@@ -5413,7 +5413,7 @@ func (h *Handler) HandleCreateWSToken(w http.ResponseWriter, r *http.Request) {
 
 	httputil.JSON(w, http.StatusOK, map[string]interface{}{
 		"token":      token,
-		"expires_in": 60,
+		"expires_in": 86400,
 		"shop_id":    shopID,
 		"tenant_id":  tenantID,
 	})

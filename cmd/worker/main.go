@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
 	"openanalytics/internal/clickhouse"
@@ -114,10 +115,34 @@ func main() {
 	})
 	defer consumer.Close()
 
-	// 5. Event processing pipeline (session_start, session_end, raw events, and Meta CAPI dispatch)
+	// 5. Event processing pipeline (session_start, session_end, raw events, Meta CAPI dispatch, and live WS pub/sub)
 	eventHandler := func(ctx context.Context, event *domain.Event) error {
 		metaService.DispatchAsync(event)
-		return sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
+		procErr := sessionMgr.ProcessEventLifecycle(ctx, event, chWriter)
+		if procErr == nil && rdb != nil {
+			tenantKey := ""
+			if event.TenantID != uuid.Nil {
+				tenantKey = event.TenantID.String()
+			}
+			shopKey := event.ShopID.String()
+
+			// Broadcast live event notification to Redis Pub/Sub for WebSocket Hub
+			eventPayload := `{"json":{"count":1}}`
+			_ = rdb.Publish(ctx, fmt.Sprintf("analytics:live:events:%s:%s", tenantKey, shopKey), eventPayload).Err()
+			if tenantKey != "" {
+				_ = rdb.Publish(ctx, fmt.Sprintf("analytics:live:events:%s", shopKey), eventPayload).Err()
+			}
+
+			// Broadcast updated live active visitor count
+			if activeCount, aerr := sessionMgr.GetActiveSessionsCount(ctx, event.ShopID); aerr == nil {
+				visitorPayload := fmt.Sprintf(`{"json":%d}`, activeCount)
+				_ = rdb.Publish(ctx, fmt.Sprintf("analytics:live:visitors:%s:%s", tenantKey, shopKey), visitorPayload).Err()
+				if tenantKey != "" {
+					_ = rdb.Publish(ctx, fmt.Sprintf("analytics:live:visitors:%s", shopKey), visitorPayload).Err()
+				}
+			}
+		}
+		return procErr
 	}
 
 	// 6. Launch Consumer Loop in background goroutine

@@ -141,7 +141,6 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 					if !ok {
 						return
 					}
-					// Channels format: "analytics:live:{topic}:{tenantID}:{shopID}" or "analytics:live:{topic}:{shopID}"
 					parts := strings.Split(msg.Channel, ":")
 					if len(parts) >= 5 {
 						topic := parts[2]
@@ -149,6 +148,11 @@ func (h *WebSocketHub) Start(ctx context.Context) {
 						shopID := parts[4]
 						h.broadcast <- wsBroadcastMessage{
 							key:     clientKey(topic, tenantID, shopID),
+							payload: []byte(msg.Payload),
+						}
+						// Fallback broadcast for clients subscribed with only shopID
+						h.broadcast <- wsBroadcastMessage{
+							key:     fmt.Sprintf("%s:%s", topic, shopID),
 							payload: []byte(msg.Payload),
 						}
 					} else if len(parts) == 4 {
@@ -339,6 +343,19 @@ func (h *WebSocketHub) ServeLiveEvents(w http.ResponseWriter, r *http.Request) {
 		shopID:   shopID,
 		topic:    "events",
 	}
+
+	// Immediately buffer initial event frame so client receives confirmation upon connection
+	envelope := map[string]any{
+		"json": map[string]any{
+			"count": 0,
+		},
+	}
+	bytes, _ := json.Marshal(envelope)
+	select {
+	case client.send <- bytes:
+	default:
+	}
+
 	h.register <- client
 
 	go client.writePump()
