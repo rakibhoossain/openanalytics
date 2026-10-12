@@ -5186,7 +5186,7 @@ func (h *Handler) HandleGetMetaIntegration(w http.ResponseWriter, r *http.Reques
 		"pixel_id":         integration.Credentials.PixelID,
 		"has_access_token": hasToken,
 		"masked_token":     maskedToken,
-		"test_event_code":  integration.Credentials.TestEventCode,
+		"test_event_code":  "",
 		"events_whitelist": whitelist,
 		"updated_at":       integration.UpdatedAt,
 	})
@@ -5251,8 +5251,6 @@ func (h *Handler) HandleSaveMetaIntegration(w http.ResponseWriter, r *http.Reque
 		pixelID = existing.Credentials.PixelID
 	}
 
-	testEventCode := strings.TrimSpace(payload.TestEventCode)
-
 	whitelist := payload.EventsWhitelist
 	if len(whitelist) == 0 && existing != nil && len(existing.EventsWhitelist) > 0 {
 		whitelist = existing.EventsWhitelist
@@ -5266,7 +5264,7 @@ func (h *Handler) HandleSaveMetaIntegration(w http.ResponseWriter, r *http.Reque
 		Credentials: meta.MetaCredentials{
 			PixelID:       pixelID,
 			AccessToken:   accessToken,
-			TestEventCode: testEventCode,
+			TestEventCode: "", // Test code is ephemeral; never persist in credentials
 		},
 		EventsWhitelist: whitelist,
 	}
@@ -5314,9 +5312,6 @@ func (h *Handler) HandleTestMetaIntegration(w http.ResponseWriter, r *http.Reque
 				}
 				if accessToken == "" || strings.Contains(accessToken, "***") {
 					accessToken = existing.Credentials.AccessToken
-				}
-				if testEventCode == "" {
-					testEventCode = existing.Credentials.TestEventCode
 				}
 			}
 		}

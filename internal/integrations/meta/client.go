@@ -29,7 +29,7 @@ func NewClient(customBaseURL string) *Client {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 20,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: false,
+		DisableCompression:  false,
 	}
 
 	return &Client{

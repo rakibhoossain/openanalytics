@@ -98,7 +98,14 @@ func (s *Service) ProcessEvent(ctx context.Context, event *domain.Event) error {
 	}
 
 	// 4. Send to Meta Conversions API
-	resp, err := s.client.SendEvents(ctx, creds.PixelID, creds.AccessToken, creds.TestEventCode, []CAPIEvent{*capiEvent})
+	// Notice: Real background customer events must NEVER include a test_event_code.
+	// Only allow test_event_code if explicitly passed in event properties for debugging.
+	testCode := ""
+	if tc, ok := event.Properties["test_event_code"]; ok && tc != "" {
+		testCode = tc
+	}
+
+	resp, err := s.client.SendEvents(ctx, creds.PixelID, creds.AccessToken, testCode, []CAPIEvent{*capiEvent})
 	if err != nil {
 		log.Printf("[Meta CAPI Error] Failed to dispatch %s for shop %s: %v",
 			capiEvent.EventName, event.ShopID.String(), err)
