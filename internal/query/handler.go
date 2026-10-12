@@ -3555,7 +3555,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 		CustomerID       string  `json:"customerId"`
 		IsIdentified     bool    `json:"isIdentified"`
 		CartID           string  `json:"cartId"`
-		CartValue        float64 `json:"cartValue"`
+		CartValue        int64   `json:"cartValue"`
 		CartItems        int64   `json:"cartItems"`
 		Views            int64   `json:"views"`
 		Carts            int64   `json:"carts"`
@@ -3747,7 +3747,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				CustomerID:       custID,
 				IsIdentified:     custID != "" && custID != "00000000-0000-0000-0000-000000000000",
 				CartID:           cartID,
-				CartValue:        finalCartVal,
+				CartValue:        finalCartCents,
 				CartItems:        carts,
 				Views:            views,
 				Carts:            carts,
@@ -3885,7 +3885,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						CustomerID:       cID,
 						IsIdentified:     cID != "" && cID != "00000000-0000-0000-0000-000000000000",
 						CartID:           crtID,
-						CartValue:        finalCartVal,
+						CartValue:        totRev,
 						CartItems:        int64(carts),
 						Views:            int64(views),
 						Carts:            int64(carts),

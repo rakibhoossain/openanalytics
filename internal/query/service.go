@@ -1160,7 +1160,7 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 			toUInt32(countIf(name = 'screen_view')) as screen_views_count,
 			toUInt8(countIf(name ILIKE '%%cart%%') > 0) as has_cart_add,
 			toUInt8(countIf(name ILIKE '%%purchase%%' OR name ILIKE '%%order%%') > 0) as has_purchase,
-			toInt64(coalesce(sum(revenue_usd), 0)) as total_revenue_usd,
+			toInt64(coalesce(sumIf(revenue_usd, name ILIKE '%%purchase%%' OR name ILIKE '%%order%%'), 0)) as total_revenue_usd,
 			any(country) as country,
 			any(city) as city,
 			any(os) as os,
