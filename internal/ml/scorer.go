@@ -249,6 +249,17 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 		}
 	} else if event.Name == "add_to_cart" {
 		pipe.HIncrBy(ctx, featureKey, "carts", 1)
+		if event.RevenueUSD != nil {
+			pipe.HIncrBy(ctx, featureKey, "cart_value_usd_cents", *event.RevenueUSD)
+		}
+		if event.Revenue != nil {
+			pipe.HIncrBy(ctx, featureKey, "cart_value_cents", *event.Revenue)
+		}
+	} else if event.Name == "purchase" || event.Name == "order_completed" {
+		pipe.HSet(ctx, featureKey, "carts", 0)
+		pipe.HSet(ctx, featureKey, "cart_value_usd_cents", 0)
+		pipe.HSet(ctx, featureKey, "cart_value_cents", 0)
+		pipe.HSet(ctx, featureKey, "cart_id", "")
 	}
 
 	if event.SessionID != uuid.Nil {
@@ -257,11 +268,11 @@ func (s *Scorer) ProcessEvent(ctx context.Context, event *domain.Event) (float64
 	if event.CustomerID != nil && *event.CustomerID != uuid.Nil {
 		pipe.HSet(ctx, featureKey, "customer_id", event.CustomerID.String())
 	}
-	if event.CartID != nil && *event.CartID != uuid.Nil {
+	if event.CartID != nil && *event.CartID != uuid.Nil && event.Name != "purchase" && event.Name != "order_completed" {
 		pipe.HSet(ctx, featureKey, "cart_id", event.CartID.String())
 	}
-	if event.Revenue != nil {
-		pipe.HIncrBy(ctx, featureKey, "cart_value_cents", *event.Revenue)
+	if event.Currency != "" {
+		pipe.HSet(ctx, featureKey, "cart_currency", event.Currency)
 	}
 	if event.Country != "" {
 		pipe.HSet(ctx, featureKey, "country", event.Country)

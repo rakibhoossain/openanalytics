@@ -335,17 +335,9 @@ func (h *Handler) HandleFunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID, err := uuid.Parse(req.TenantID)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
 	if err != nil {
-		tenantID, _ = uuid.Parse(r.Header.Get("X-Tenant-ID"))
-	}
-	shopID, err := uuid.Parse(req.ShopID)
-	if err != nil {
-		shopID, _ = uuid.Parse(r.Header.Get("X-Shop-ID"))
-	}
-
-	if tenantID == uuid.Nil || shopID == uuid.Nil {
-		httputil.Error(w, http.StatusBadRequest, "BAD_REQUEST", "valid tenant_id and shop_id are required")
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", err.Error())
 		return
 	}
 	if h.queryService == nil {
@@ -602,27 +594,18 @@ func roundVal(val float64, precision int) float64 {
 	return math.Round(val*pow) / pow
 }
 
-// Helper: extract tenant_id and shop_id from headers, URL parameters, or tRPC input.
+// Helper: extract tenant_id and shop_id strictly from request headers.
 func (h *Handler) extractTenantAndShop(r *http.Request) (uuid.UUID, uuid.UUID, error) {
-	sStr := r.Header.Get("X-Shop-ID")
+	sStr := strings.TrimSpace(r.Header.Get("X-Shop-ID"))
 	if sStr == "" {
-		sStr = h.getParam(r, "shopId")
-	}
-	if sStr == "" {
-		sStr = h.getParam(r, "projectId")
-	}
-	if sStr == "" {
-		return uuid.Nil, uuid.Nil, errors.New("missing required shop ID (X-Shop-ID, shopId, or projectId)")
+		return uuid.Nil, uuid.Nil, errors.New("missing required X-Shop-ID header")
 	}
 	shopID, err := uuid.Parse(sStr)
 	if err != nil {
-		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid shop ID: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("invalid X-Shop-ID header: %w", err)
 	}
 
-	tStr := r.Header.Get("X-Tenant-ID")
-	if tStr == "" {
-		tStr = h.getParam(r, "tenantId")
-	}
+	tStr := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
 	var tenantID uuid.UUID
 	if tStr != "" {
 		tenantID, _ = uuid.Parse(tStr)
@@ -3557,7 +3540,11 @@ func (h *Handler) HandleTRPCReportResetLayout(w http.ResponseWriter, r *http.Req
 
 // HandleTRPCIntents serves /trpc/ml.intents for live behavioural scoring in the frontend.
 func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
-	tenantID, shopID, _ := h.extractTenantAndShop(r)
+	tenantID, shopID, err := h.extractTenantAndShop(r)
+	if err != nil {
+		sendTRPCError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	shopIDStr := shopID.String()
 	targetCurrency := h.extractCurrency(r)
 
@@ -3568,7 +3555,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 		CustomerID       string  `json:"customerId"`
 		IsIdentified     bool    `json:"isIdentified"`
 		CartID           string  `json:"cartId"`
-		CartValue        int64   `json:"cartValue"`
+		CartValue        float64 `json:"cartValue"`
 		CartItems        int64   `json:"cartItems"`
 		Views            int64   `json:"views"`
 		Carts            int64   `json:"carts"`
@@ -3595,13 +3582,10 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	seenSessions := make(map[string]bool)
 
-	// 1. Check live Redis keys first
+	// 1. Check live Redis keys first (strictly scoped to shopID)
 	if h.rdb != nil {
 		pattern := fmt.Sprintf("shopper:intent:%s:*", shopIDStr)
-		keys, err := h.rdb.Keys(ctx, pattern).Result()
-		if err != nil || len(keys) == 0 {
-			keys, _ = h.rdb.Keys(ctx, "shopper:intent:*").Result()
-		}
+		keys, _ := h.rdb.Keys(ctx, pattern).Result()
 
 		for _, k := range keys {
 			val, err := h.rdb.Get(ctx, k).Float64()
@@ -3612,19 +3596,15 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 			parts := strings.Split(k, ":")
 			devID := parts[len(parts)-1]
 
-			actualShopID := shopIDStr
-			if len(parts) >= 4 {
-				actualShopID = parts[2]
-			}
-			featKey := fmt.Sprintf("shopper:feat:%s:%s", actualShopID, devID)
+			featKey := fmt.Sprintf("shopper:feat:%s:%s", shopIDStr, devID)
 			fvals, _ := h.rdb.HMGet(ctx, featKey,
 				"views", "carts", "first_seen_ms", "last_seen_ms",
-				"session_id", "customer_id", "cart_id", "cart_value_cents",
+				"session_id", "customer_id", "cart_id", "cart_value_usd_cents", "cart_value_cents", "cart_currency",
 				"country", "city", "path", "device", "browser", "os",
 			).Result()
 
-			var views, carts, firstSeen, lastSeen, cartCents int64
-			sessID, custID, cartID := "", "", ""
+			var views, carts, firstSeen, lastSeen, cartUSDCents, rawCartCents int64
+			sessID, custID, cartID, cartCurrency := "", "", "", ""
 			country, city, path, devType, browser, osStr := "", "", "", "Desktop", "Chrome", "macOS"
 
 			if len(fvals) >= 4 {
@@ -3641,7 +3621,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 					fmt.Sscan(fmt.Sprint(fvals[3]), &lastSeen)
 				}
 			}
-			if len(fvals) >= 8 {
+			if len(fvals) >= 10 {
 				if fvals[4] != nil {
 					sessID = fmt.Sprint(fvals[4])
 				}
@@ -3652,27 +3632,33 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 					cartID = fmt.Sprint(fvals[6])
 				}
 				if fvals[7] != nil {
-					fmt.Sscan(fmt.Sprint(fvals[7]), &cartCents)
+					fmt.Sscan(fmt.Sprint(fvals[7]), &cartUSDCents)
+				}
+				if fvals[8] != nil {
+					fmt.Sscan(fmt.Sprint(fvals[8]), &rawCartCents)
+				}
+				if fvals[9] != nil {
+					cartCurrency = strings.ToUpper(strings.TrimSpace(fmt.Sprint(fvals[9])))
 				}
 			}
-			if len(fvals) >= 14 {
-				if fvals[8] != nil && fmt.Sprint(fvals[8]) != "" {
-					country = fmt.Sprint(fvals[8])
-				}
-				if fvals[9] != nil && fmt.Sprint(fvals[9]) != "" {
-					city = fmt.Sprint(fvals[9])
-				}
+			if len(fvals) >= 16 {
 				if fvals[10] != nil && fmt.Sprint(fvals[10]) != "" {
-					path = fmt.Sprint(fvals[10])
+					country = fmt.Sprint(fvals[10])
 				}
 				if fvals[11] != nil && fmt.Sprint(fvals[11]) != "" {
-					devType = fmt.Sprint(fvals[11])
+					city = fmt.Sprint(fvals[11])
 				}
 				if fvals[12] != nil && fmt.Sprint(fvals[12]) != "" {
-					browser = fmt.Sprint(fvals[12])
+					path = fmt.Sprint(fvals[12])
 				}
 				if fvals[13] != nil && fmt.Sprint(fvals[13]) != "" {
-					osStr = fmt.Sprint(fvals[13])
+					devType = fmt.Sprint(fvals[13])
+				}
+				if fvals[14] != nil && fmt.Sprint(fvals[14]) != "" {
+					browser = fmt.Sprint(fvals[14])
+				}
+				if fvals[15] != nil && fmt.Sprint(fvals[15]) != "" {
+					osStr = fmt.Sprint(fvals[15])
 				}
 			}
 
@@ -3682,11 +3668,11 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Read churn & price scores from Redis or fallback
-			churnVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:churn:%s:%s", actualShopID, devID)).Float64()
+			churnVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:churn:%s:%s", shopIDStr, devID)).Float64()
 			if churnVal == 0 {
 				churnVal = 0.25
 			}
-			priceVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:price:%s:%s", actualShopID, devID)).Float64()
+			priceVal, _ := h.rdb.Get(ctx, fmt.Sprintf("shopper:price:%s:%s", shopIDStr, devID)).Float64()
 			if priceVal == 0 {
 				priceVal = 0.35
 			}
@@ -3715,13 +3701,25 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				priceTier = "MODERATE"
 			}
 
-			if h.currencyService != nil && targetCurrency != "USD" {
-				cartCents = h.currencyService.ConvertFromUSD(cartCents, targetCurrency)
+			var finalCartCents int64
+			if cartUSDCents > 0 {
+				if h.currencyService != nil && targetCurrency != "USD" {
+					finalCartCents = h.currencyService.ConvertFromUSD(cartUSDCents, targetCurrency)
+				} else {
+					finalCartCents = cartUSDCents
+				}
+			} else if rawCartCents > 0 {
+				if cartCurrency != "" && cartCurrency != targetCurrency && h.currencyService != nil {
+					finalCartCents = h.currencyService.Convert(rawCartCents, cartCurrency, targetCurrency)
+				} else {
+					finalCartCents = rawCartCents
+				}
 			}
 
+			finalCartVal := roundVal(float64(finalCartCents)/100.0, 2)
 			signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
 			if cartID != "" && carts > 0 {
-				signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", float64(cartCents)/100.0, targetCurrency, carts, intentTier)
+				signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", finalCartVal, targetCurrency, carts, intentTier)
 			} else if val >= 0.85 {
 				signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", val*100, carts)
 			}
@@ -3749,7 +3747,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				CustomerID:       custID,
 				IsIdentified:     custID != "" && custID != "00000000-0000-0000-0000-000000000000",
 				CartID:           cartID,
-				CartValue:        cartCents,
+				CartValue:        finalCartVal,
 				CartItems:        carts,
 				Views:            views,
 				Carts:            carts,
@@ -3774,7 +3772,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. ClickHouse supplement: if fewer than 6 live sessions, fetch from ClickHouse
+	// 2. ClickHouse supplement: if fewer than 8 live sessions, fetch strictly scoped to this shopID
 	if len(results) < 8 {
 		chQuery := fmt.Sprintf(`
 			SELECT
@@ -3793,16 +3791,16 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 				coalesce(any(e.os), '') as os,
 				coalesce(any(e.device), 'Desktop') as dev_type,
 				coalesce(any(e.path), '/') as path,
-				coalesce(sum(e.revenue_usd), 0) as tot_rev
+				coalesce(sumIf(e.revenue_usd, e.name = 'add_to_cart'), 0) as tot_rev
 			FROM %s.shopper_features f
-			LEFT JOIN %s.events e ON f.session_id = e.session_id
-			WHERE (f.shop_id = ? OR f.tenant_id = ?)
+			LEFT JOIN %s.events e ON f.session_id = e.session_id AND e.shop_id = f.shop_id
+			WHERE f.shop_id = ? AND (f.tenant_id = ? OR ? = '00000000-0000-0000-0000-000000000000')
 			GROUP BY f.device_id, f.session_id, f.views_count, f.cart_adds_count, f.distinct_products, f.total_dwell_seconds, f.cart_intent_score, f.last_event_at
 			ORDER BY f.last_event_at DESC
 			LIMIT 12
 		`, h.queryService.database, h.queryService.database)
 
-		if rows, err := h.queryService.Conn().Query(ctx, chQuery, shopID, tenantID); err == nil {
+		if rows, err := h.queryService.Conn().Query(ctx, chQuery, shopID, tenantID, tenantID); err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var devID, sID, cID, crtID, country, city, browser, osStr, devType, path string
@@ -3856,21 +3854,23 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						priceTier = "MODERATE"
 					}
 
-					// Check replay
+					if h.currencyService != nil && targetCurrency != "USD" {
+						totRev = h.currencyService.ConvertFromUSD(totRev, targetCurrency)
+					}
+					finalCartVal := roundVal(float64(totRev)/100.0, 2)
+
+					signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
+					if crtID != "" && crtID != "00000000-0000-0000-0000-000000000000" && carts > 0 {
+						signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", finalCartVal, targetCurrency, carts, intentTier)
+					} else if intentScore >= 0.85 {
+						signals = fmt.Sprintf("High purchase propensity (%.1f%%), %d items in cart", intentScore*100, carts)
+					}
+
 					hasReplay := false
 					if parsedSID, err := uuid.Parse(sID); err == nil {
 						var rCount uint64
 						_ = h.queryService.Conn().QueryRow(ctx, fmt.Sprintf("SELECT count() FROM %s.session_replay_chunks WHERE session_id = ?", h.queryService.database), parsedSID).Scan(&rCount)
 						hasReplay = rCount > 0
-					}
-
-					if h.currencyService != nil && targetCurrency != "USD" {
-						totRev = h.currencyService.ConvertFromUSD(totRev, targetCurrency)
-					}
-
-					signals := fmt.Sprintf("%d views, %d in cart, %ds dwell", views, carts, dwell)
-					if crtID != "" && crtID != "00000000-0000-0000-0000-000000000000" {
-						signals = fmt.Sprintf("Active Cart (%.2f %s • %d items), %s", float64(totRev)/100.0, targetCurrency, carts, intentTier)
 					}
 
 					profID := cID
@@ -3885,7 +3885,7 @@ func (h *Handler) HandleTRPCIntents(w http.ResponseWriter, r *http.Request) {
 						CustomerID:       cID,
 						IsIdentified:     cID != "" && cID != "00000000-0000-0000-0000-000000000000",
 						CartID:           crtID,
-						CartValue:        totRev,
+						CartValue:        finalCartVal,
 						CartItems:        int64(carts),
 						Views:            int64(views),
 						Carts:            int64(carts),
@@ -5209,28 +5209,25 @@ func (h *Handler) HandleSaveMetaIntegration(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if payload.ShopID == "" {
-		payload.ShopID = r.Header.Get("X-Shop-ID")
-	}
-	if payload.TenantID == "" {
-		payload.TenantID = r.Header.Get("X-Tenant-ID")
-	}
-
-	if payload.ShopID == "" {
-		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header (or shop_id) is required")
+	shopIDStr := strings.TrimSpace(r.Header.Get("X-Shop-ID"))
+	if shopIDStr == "" {
+		httputil.Error(w, http.StatusBadRequest, "MISSING_SHOP_ID", "X-Shop-ID header is required")
 		return
 	}
-	shopID, err := uuid.Parse(payload.ShopID)
+	shopID, err := uuid.Parse(shopIDStr)
 	if err != nil {
-		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Invalid shop_id UUID: "+err.Error())
+		httputil.Error(w, http.StatusBadRequest, "INVALID_SHOP_ID", "Invalid X-Shop-ID header UUID: "+err.Error())
 		return
 	}
+	payload.ShopID = shopID.String()
 
 	var tenantID uuid.UUID
-	if payload.TenantID != "" {
-		if tid, err := uuid.Parse(payload.TenantID); err == nil {
-			tenantID = tid
-		}
+	tenantIDStr := strings.TrimSpace(r.Header.Get("X-Tenant-ID"))
+	if tenantIDStr != "" {
+		tenantID, _ = uuid.Parse(tenantIDStr)
+	}
+	if tenantID == uuid.Nil {
+		tenantID = h.resolveTenantForShop(r.Context(), shopID)
 	}
 
 	repo := h.getMetaRepo()
@@ -5304,8 +5301,8 @@ func (h *Handler) HandleTestMetaIntegration(w http.ResponseWriter, r *http.Reque
 	accessToken := strings.TrimSpace(payload.AccessToken)
 	testEventCode := strings.TrimSpace(payload.TestEventCode)
 
-	if payload.ShopID == "" {
-		payload.ShopID = r.Header.Get("X-Shop-ID")
+	if sHdr := strings.TrimSpace(r.Header.Get("X-Shop-ID")); sHdr != "" {
+		payload.ShopID = sHdr
 	}
 
 	repo := h.getMetaRepo()

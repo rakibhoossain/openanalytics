@@ -1135,11 +1135,11 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 	countQuery := fmt.Sprintf(`
 		SELECT count(DISTINCT session_id)
 		FROM %s.events
-		WHERE (tenant_id = ? OR shop_id = ?) AND session_id != '00000000-0000-0000-0000-000000000000'
+		WHERE shop_id = ? AND (tenant_id = ? OR tenant_id = '00000000-0000-0000-0000-000000000000') AND session_id != '00000000-0000-0000-0000-000000000000'
 	`, s.database)
 
 	var total uint64
-	_ = s.conn.QueryRow(ctx, countQuery, tenantID, shopID).Scan(&total)
+	_ = s.conn.QueryRow(ctx, countQuery, shopID, tenantID).Scan(&total)
 
 	dataQuery := fmt.Sprintf(`
 		SELECT 
@@ -1167,13 +1167,13 @@ func (s *Service) GetSessionsList(ctx context.Context, tenantID, shopID uuid.UUI
 			any(browser) as browser,
 			any(device) as device
 		FROM %s.events
-		WHERE (tenant_id = ? OR shop_id = ?) AND session_id != '00000000-0000-0000-0000-000000000000'
+		WHERE shop_id = ? AND (tenant_id = ? OR tenant_id = '00000000-0000-0000-0000-000000000000') AND session_id != '00000000-0000-0000-0000-000000000000'
 		GROUP BY session_id
 		ORDER BY ended_at DESC
 		LIMIT ? OFFSET ?
 	`, s.database)
 
-	rows, err := s.conn.Query(ctx, dataQuery, tenantID, shopID, limit, offset)
+	rows, err := s.conn.Query(ctx, dataQuery, shopID, tenantID, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to list sessions: %w", err)
 	}
