@@ -113,8 +113,8 @@ func (s *Service) ProcessEvent(ctx context.Context, event *domain.Event) error {
 	}
 
 	if resp != nil && resp.EventsReceived > 0 {
-		log.Printf("[Meta CAPI Success] Delivered %s for shop %s (Received: %d, Trace: %s, EventID: %s)",
-			capiEvent.EventName, event.ShopID.String(), resp.EventsReceived, resp.FBTraceID, capiEvent.EventID)
+		log.Printf("[Meta CAPI Success] Delivered %s for shop %s (Received: %d, Trace: %s, EventID: %s, testCode: %s)",
+			capiEvent.EventName, event.ShopID.String(), resp.EventsReceived, resp.FBTraceID, capiEvent.EventID, testCode)
 	}
 
 	return nil
